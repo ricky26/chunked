@@ -22,8 +22,7 @@ pub use world::{
     SnapshotWriter,
 };
 pub use system::{  
-    ChunkSystem,
-    SnapshotSystem,
+    System,
     SystemRegistration,
     SystemSet,
 };

@@ -1,16 +1,16 @@
 use std::io::Write;
 use std::sync::Arc;
 use std::collections::HashMap;
+use futures::executor::block_on;
 use async_trait::async_trait;
 use ecs::{
     component,
     ComponentType,
     World,
     CommandBuffer,
-    ChunkSystem,
+    System,
     SystemSet,
     SystemRegistration,
-    Snapshot,
     SnapshotWriter,
     EntityID,
 };
@@ -33,8 +33,10 @@ component!(Mass);
 pub struct ApplyNewtonianAccel;
 
 #[async_trait]
-impl ChunkSystem for ApplyNewtonianAccel {
-    async fn update(&mut self, snapshot: &Arc<Snapshot>, writer: &SnapshotWriter) {
+impl System for ApplyNewtonianAccel {
+    async fn update(&mut self, writer: &SnapshotWriter) {
+        let snapshot = writer.snapshot();
+
         for chunk_index_a in 0..writer.num_chunks() {
             let mut chunk_a = writer.borrow_chunk_mut(chunk_index_a);
             let mut chunk_writer = chunk_a.writer();
@@ -93,8 +95,8 @@ impl ChunkSystem for ApplyNewtonianAccel {
 pub struct ApplyVelocity;
 
 #[async_trait]
-impl ChunkSystem for ApplyVelocity {
-    async fn update(&mut self, _snapshot: &Arc<Snapshot>, writer: &SnapshotWriter) {
+impl System for ApplyVelocity {
+    async fn update(&mut self, writer: &SnapshotWriter) {
         let component_types = &[
             ComponentType::for_type::<Velocity>(),
             ComponentType::for_type::<Position>(),
@@ -118,8 +120,7 @@ impl ChunkSystem for ApplyVelocity {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let world = Arc::new(World::new());
     let arch = world.ensure_archetype(vec![
         ComponentType::for_type::<Position>(),
@@ -149,16 +150,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        command_buffer.execute().await;
+        block_on(command_buffer.execute());
     }
 
     let mut system_set = SystemSet::new();
 
-    let accel_sys = system_set.insert(SystemRegistration::new_chunk(ApplyNewtonianAccel)
+    let accel_sys = system_set.insert(SystemRegistration::from_system(ApplyNewtonianAccel)
         .read::<Position>()
         .read::<Mass>()
         .write::<Velocity>()).unwrap();
-    system_set.insert(SystemRegistration::new_chunk(ApplyVelocity)
+    system_set.insert(SystemRegistration::from_system(ApplyVelocity)
         .after(accel_sys)
         .read::<Velocity>()
         .write::<Position>()).unwrap();
@@ -177,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for _ in 0..NUM_ITER {
         for _ in 0..10usize {
-            system_set.update(&world).await;
+            block_on(system_set.update(&world));
         }
 
         // Render result!

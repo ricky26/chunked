@@ -1,66 +1,63 @@
 //! Composable ECS systems.
 
 use std::fmt::Display;
-use std::pin::Pin;
 use std::fmt::Debug;
 use std::sync::{Arc};
 use std::cmp::{Ord};
-use std::future::Future;
-use std::task::Poll;
-use futures::future;
+use futures::future::{self, FutureExt};
 use async_trait::async_trait;
-use tokio::task::JoinHandle;
 
 use crate::entity::{Component, ComponentType,};
-use crate::world::{Snapshot, SnapshotWriter, World};
+use crate::world::{SnapshotWriter, World};
 
+/// An ECS system.
 #[async_trait]
-pub trait ChunkSystem {
-    async fn update(&mut self, snapshot: &Arc<Snapshot>, writer: &SnapshotWriter);
+pub trait System {
+    /// Update the system.
+    /// 
+    /// Any changes to the world will be represented in `writer`.
+    async fn update(&mut self, writer: &SnapshotWriter);
 }
 
-#[async_trait]
-pub trait SnapshotSystem {
-    async fn update(&mut self, snapshot: &Arc<Snapshot>) -> Arc<Snapshot>;
-}
-
-enum SystemRef {
-    Snapshot(Box<dyn SnapshotSystem + Send + 'static>),
-    Chunk(Box<dyn ChunkSystem + Send + 'static>),
-}
-
+/// A token which represents a system in a `SystemSet`.
+/// 
+/// These tokens are not unique between `SystemSet`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SystemToken(pub usize);
 
+type BoxedSystem = Box<dyn System + Send + 'static>;
+
+/// A registration used for building `SystemSet`s.
 pub struct SystemRegistration {
-    system: SystemRef,
+    system: BoxedSystem,
     before: Vec<SystemToken>,
     after: Vec<SystemToken>,
     read: Vec<ComponentType>,
     write: Vec<ComponentType>,
+    barrier: bool,
 }
 
 impl SystemRegistration {
-    fn new(system: SystemRef) -> SystemRegistration {
+    /// Create a new registration from the boxed system.
+    fn new(system: BoxedSystem) -> SystemRegistration {
         SystemRegistration {
             system,
             before: Vec::new(),
             after: Vec::new(),
             read: Vec::new(),
             write: Vec::new(),
+            barrier: false,
         }
     }
 
-    pub fn new_snapshot(system: impl SnapshotSystem + Send + 'static) -> SystemRegistration {
-        let boxed = Box::new(system) as Box<dyn SnapshotSystem + Send + 'static>;
-        SystemRegistration::new(SystemRef::Snapshot(boxed))
+    /// Create a new registration from any object implementing `System`.
+    pub fn from_system(system: impl System + Send + 'static) -> SystemRegistration {
+        let boxed = Box::new(system) as BoxedSystem;
+        SystemRegistration::new(boxed)
     }
 
-    pub fn new_chunk(system: impl ChunkSystem + Send + 'static) -> SystemRegistration {
-        let boxed = Box::new(system) as Box<dyn ChunkSystem + Send + 'static>;
-        SystemRegistration::new(SystemRef::Chunk(boxed))
-    }
-
+    /// Require that this system is updated before the system represented
+    /// by the given token.
     pub fn before(mut self, system: SystemToken) -> Self {
         if let Err(insert_idx) = self.before.binary_search(&system) {
             self.before.insert(insert_idx, system);
@@ -69,6 +66,8 @@ impl SystemRegistration {
         self
     }
 
+    /// Require that this system is updated after the system represented
+    /// by the given token.
     pub fn after(mut self, system: SystemToken) -> Self {
         if let Err(insert_idx) = self.after.binary_search(&system) {
             self.after.insert(insert_idx, system);
@@ -77,25 +76,37 @@ impl SystemRegistration {
         self
     }
 
+    /// Declare that this system reads the given component types.
     pub fn read_component_type(mut self, component_type: ComponentType) -> Self {
         self.read.push(component_type);
         self
     }
 
+    /// Declare that this system reads the given component types.
     pub fn read<T: Component>(self) -> Self {
         self.read_component_type(ComponentType::for_type::<T>())
     }
 
+    /// Declare that this system writes the given component types.
     pub fn write_component_type(mut self, component_type: ComponentType) -> Self {
         self.write.push(component_type);
         self
     }
 
+    /// Declare that this system writes the given component types.
     pub fn write<T: Component>(self) -> Self {
         self.write_component_type(ComponentType::for_type::<T>())
     }
+
+    /// Require that this system has exclusive access to the world during its
+    /// update.
+    pub fn barrier(mut self) -> Self {
+        self.barrier = true;
+        self
+    }
 }
 
+/// The error returned when the requirements for a system cannot be met.
 #[derive(Clone, Debug)]
 pub struct SystemRegistrationError;
 
@@ -123,31 +134,12 @@ impl SystemSetSystem {
         }
     }
 
-    pub fn will_write(&self) -> bool {
-        match &self.registration.system {
-            &SystemRef::Snapshot(_) => true,
-            &SystemRef::Chunk(_) => !self.registration.write.is_empty(),
-        }
-    }
-
     /// Spawn an execution of this system.
     /// 
     /// This is unsafe as you /must/ wait for the task to complete before using
     /// this system for anything else.
-    pub unsafe fn spawn(&mut self, snapshot: &Arc<Snapshot>, writer: &SnapshotWriter) -> JoinHandle<()> {
-        let mut sys: &mut SystemRef = std::mem::transmute(&mut self.registration.system);
-        let snapshot = snapshot.clone();
-        let writer: &'static SnapshotWriter = std::mem::transmute(writer);
-
-        tokio::task::spawn(async move {
-            match &mut sys {
-                &mut SystemRef::Chunk(sys) => sys.update(&snapshot, writer).await,
-                &mut SystemRef::Snapshot(sys) => {
-                    let snapshot = sys.update(&snapshot).await;
-                    writer.set_snapshot(snapshot);
-                },
-            }
-        })
+    pub async fn update(&mut self, writer: &SnapshotWriter) {
+        self.registration.system.update(writer).await
     }
 }
 
@@ -157,21 +149,20 @@ pub struct SystemSet {
     num_phases: usize,
     systems: Vec<SystemSetSystem>,
     systems_dirty: bool,
-
-    active_systems: Vec<(JoinHandle<()>, bool)>,
 }
 
 impl SystemSet {
+    /// Create a new empty `SystemSet`.
     pub fn new() -> SystemSet {
         SystemSet {
             next_system_id: 1,
             num_phases: 0,
             systems: Vec::new(),
             systems_dirty: false,
-            active_systems: Vec::new(),
         }
     }
 
+    /// Insert a system to the set according to its registration requirements.
     pub fn insert(&mut self, system: SystemRegistration) -> Result<SystemToken, SystemRegistrationError> {
         let token = SystemToken(self.next_system_id);
         self.next_system_id += 1;
@@ -208,66 +199,30 @@ impl SystemSet {
         self.num_phases = current_phase + 1;
     }
 
+    /// Run an update for every system.
     pub async fn update(&mut self, world: &Arc<World>) {
         if self.systems_dirty {
             self.update_systems()
         }
 
-        let mut num_woken = 0;
-        let mut num_writers: usize = 0;
+        let mut to_run = &mut self.systems[..];
         let mut snapshot = world.snapshot();
 
         for phase in 0..self.num_phases {
-            let writer = SnapshotWriter::new(snapshot.clone());
+            let writer = SnapshotWriter::new(snapshot);
+            let mut active_systems = Vec::with_capacity(to_run.len());
 
-            while let Some(sys) = self.systems.get_mut(num_woken).filter(|s| s.phase == phase) {
-                num_woken += 1;
+            while to_run.first().map_or(false, |s| s.phase <= phase) {
+                let (woken, rest) = to_run.split_first_mut().unwrap();
+                to_run = rest;
 
-                let will_write = sys.will_write();
-                if will_write {
-                    num_writers += 1;
-                }
-
-                self.active_systems.push((unsafe { sys.spawn(&snapshot, &writer) }, will_write));
+                active_systems.push(woken.update(&writer).boxed());
             }
 
-            while num_writers > 0 {
-                let futures = &mut self.active_systems;
-                let done_idx = future::poll_fn(|cx| {
-                    for (idx, f) in futures.into_iter().enumerate() {
-                        match Pin::new(&mut f.0).poll(cx) {
-                            Poll::Ready(_) => return Poll::Ready(idx),
-                            Poll::Pending => {},
-                        }
-                    }
-
-                    Poll::Pending
-                }).await;
-
-                if futures[done_idx].1 {
-                    num_writers -= 1;
-                }
-
-                self.active_systems.remove(done_idx);
-            }
-
+            future::join_all(&mut active_systems).await;
+            
+            drop(active_systems);
             snapshot = writer.into_inner();
-        }
-
-        while !self.active_systems.is_empty() {
-            let futures = &mut self.active_systems;
-            let done_idx = future::poll_fn(|cx| {
-                for (idx, f) in futures.into_iter().enumerate() {
-                    match Pin::new(&mut f.0).poll(cx) {
-                        Poll::Ready(_) => return Poll::Ready(idx),
-                        Poll::Pending => {},
-                    }
-                }
-
-                Poll::Pending
-            }).await;
-
-            self.active_systems.remove(done_idx);
         }
 
         world.set_snapshot(snapshot);
