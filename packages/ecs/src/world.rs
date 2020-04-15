@@ -1,3 +1,5 @@
+//! A world which can hold entities.
+
 use std::ops::{Deref, DerefMut};
 use std::fmt::{self, Debug};
 use std::sync::{self, Arc, Weak, atomic::{self, AtomicUsize}};
@@ -35,6 +37,15 @@ fn option_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
     }
 }
 
+enum SnapshotWriterState {
+    Original(Arc<Snapshot>),
+    Replace(Arc<Snapshot>),
+    ChunkWise {
+        snapshot: Arc<Snapshot>,
+        locked: BitVec,
+    },
+}
+
 /// A writer for modifying snapshots.
 /// 
 /// This can be used in one of two ways:
@@ -42,7 +53,7 @@ fn option_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 /// - As a chunk-wise writer (which allows parallel writing).
 pub struct SnapshotWriter {
     num_chunks: usize,
-    contents: sync::Mutex<(Arc<Snapshot>, BitVec)>,
+    contents: sync::Mutex<SnapshotWriterState>,
     cond: sync::Condvar,
 }
 
@@ -55,14 +66,28 @@ impl SnapshotWriter {
 
         SnapshotWriter {
             num_chunks,
-            contents: sync::Mutex::new((snapshot, BitVec::from_elem(num_chunks, false))),
+            contents: sync::Mutex::new(SnapshotWriterState::Original(snapshot)),
             cond: sync::Condvar::new(),
+        }
+    }
+
+    /// Get the base snapshot this writer was based upon.
+    pub fn snapshot(&self) -> Arc<Snapshot> {
+        let contents = self.contents.lock().unwrap();
+        match &*contents {
+            &SnapshotWriterState::Original(ref snapshot) => snapshot.clone(),
+            &SnapshotWriterState::Replace(ref snapshot) => snapshot.clone(),
+            &SnapshotWriterState::ChunkWise { ref snapshot, .. } => snapshot.clone(),
         }
     }
 
     /// Deconstruct this writer and return the resultant snapshot.
     pub fn into_inner(self) -> Arc<Snapshot> {
-        self.contents.into_inner().unwrap().0
+        match self.contents.into_inner().unwrap() {
+            SnapshotWriterState::Original(snapshot) => snapshot,
+            SnapshotWriterState::Replace(snapshot) => snapshot,
+            SnapshotWriterState::ChunkWise { snapshot, .. } => snapshot,
+        }
     }
 
     /// Return the number of chunks covered by this writer.
@@ -73,7 +98,31 @@ impl SnapshotWriter {
     /// Set the final snapshot directly.
     pub fn set_snapshot(&self, snapshot: Arc<Snapshot>) {
         let mut contents = self.contents.lock().unwrap();
-        contents.0 = snapshot;
+
+        // Take exclusive lock!
+        loop {
+            match &mut *contents {
+                &mut SnapshotWriterState::Original(_) |
+                &mut SnapshotWriterState::Replace(_) => {},
+                &mut SnapshotWriterState::ChunkWise {ref locked, .. } => {
+                    if locked.any() {
+                        contents = self.cond.wait(contents).unwrap();
+                        continue;
+                    }
+
+                    break;
+                },
+            };
+
+            break;
+        }
+
+        *contents = SnapshotWriterState::Replace(snapshot);
+    }
+
+    /// Iterate through all chunks with mutable references.
+    pub fn iter_chunks_mut(&self) -> impl Iterator<Item=SnapshotWriterGuard> + '_ {
+        (0..self.num_chunks).map(move |idx| self.borrow_chunk_mut(idx))
     }
 
     /// Borrow a single chunk mutably.
@@ -83,11 +132,27 @@ impl SnapshotWriter {
         let (chunk_set, chunk_index) = loop {
             let mut contents = self.contents.lock().unwrap();
 
+            let (snapshot, locked) = match &mut *contents {
+                &mut SnapshotWriterState::Original(ref snapshot) => {
+                    // Starting chunk-wise lock.
+                    *contents = SnapshotWriterState::ChunkWise {
+                        snapshot: snapshot.clone(),
+                        locked: BitVec::from_elem(self.num_chunks, false),
+                    };
+                    continue;
+                },
+                &mut SnapshotWriterState::Replace(_) => {
+                    panic!("tried to use chunk-wise modification after replacing snapshot");
+                },
+                &mut SnapshotWriterState::ChunkWise { ref mut snapshot, ref mut locked } =>
+                    (snapshot, locked),
+            };
+
             let (chunk_set_index, chunk_index) = {
                 let mut chunk_index = index;
                 let mut chunk_set_index = 0;
 
-                for chunk_set in contents.0.chunk_sets.iter() {
+                for chunk_set in snapshot.chunk_sets.iter() {
                     let num_chunks = chunk_set.chunks().len();
                     if num_chunks <= chunk_index {
                         chunk_set_index += 1;
@@ -100,16 +165,16 @@ impl SnapshotWriter {
                 (chunk_set_index, chunk_index)
             };
 
-            let index = contents.0.chunk_sets.iter()
+            let index = snapshot.chunk_sets.iter()
                 .map(|cs| cs.chunks().len())
                 .take(chunk_set_index)
                 .sum::<usize>() + chunk_index;
 
-            if contents.1[index] {
+            if locked[index] {
                 let _ = self.cond.wait(contents).unwrap();
             } else {
-                contents.1.set(index, true);
-                let snapshot_mut = Arc::make_mut(&mut contents.0);
+                locked.set(index, true);
+                let snapshot_mut = Arc::make_mut(snapshot);
                 let chunk_set_mut = &mut snapshot_mut.chunk_sets[chunk_set_index];
 
                 // This is safe since we only allow write access and only to
@@ -130,7 +195,13 @@ impl SnapshotWriter {
     /// Free a chunk previously locked by `borrow_chunk_mut`.
     fn free_chunk(&self, index: usize) {
         let mut contents = self.contents.lock().unwrap();
-        contents.1.set(index, false);
+
+        match &mut *contents {
+            &mut SnapshotWriterState::ChunkWise { ref mut locked, .. } =>
+                locked.set(index, false),
+            _ => unreachable!(),
+        }
+
         self.cond.notify_all();
     }
 }

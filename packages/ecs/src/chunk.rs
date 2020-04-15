@@ -1,3 +1,5 @@
+//! Logic for dealing with chunks of entities.
+
 use std::sync::Arc;
 use std::fmt::Debug;
 use std::alloc::{self, Layout};

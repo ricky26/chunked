@@ -1,3 +1,5 @@
+//! Composable ECS systems.
+
 use std::fmt::Display;
 use std::pin::Pin;
 use std::fmt::Debug;

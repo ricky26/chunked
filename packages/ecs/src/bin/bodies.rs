@@ -95,9 +95,15 @@ pub struct ApplyVelocity;
 #[async_trait]
 impl ChunkSystem for ApplyVelocity {
     async fn update(&mut self, _snapshot: &Arc<Snapshot>, writer: &SnapshotWriter) {
-        for chunk_index in 0..writer.num_chunks() {
-            let mut chunk_a = writer.borrow_chunk_mut(chunk_index);
-            let mut chunk_writer = chunk_a.writer();
+        let component_types = &[
+            ComponentType::for_type::<Velocity>(),
+            ComponentType::for_type::<Position>(),
+        ];
+        let chunks = writer.iter_chunks_mut()
+            .filter(|c| c.zone().archetype().has_all_component_types(component_types));
+
+        for mut chunk in chunks {
+            let mut chunk_writer = chunk.writer();
             let velocities = chunk_writer.get_components::<Velocity>().unwrap();
             let positions = chunk_writer.get_components_mut::<Position>().unwrap();
 

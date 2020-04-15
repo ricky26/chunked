@@ -5,6 +5,7 @@
 //! (globally). There is a macro (`component`) to help you assign a unique ID
 //! for component types.
 
+use std::ops::Deref;
 use std::fmt::Debug;
 use std::alloc::Layout;
 use std::sync::{Arc, atomic::{self, AtomicUsize}};
@@ -191,6 +192,16 @@ impl Archetype {
     /// Return the sorted list of component types in this archetype.
     pub fn component_types(&self) -> &[ComponentType] {
         &self.component_types
+    }
+
+    /// Returns true if this archetype contains the given component.
+    pub fn has_component_type(&self, component_type: &ComponentType) -> bool {
+        self.component_types.binary_search(component_type).is_ok()
+    }
+
+    /// Returns true if this archetype contains all of the given component types.
+    pub fn has_all_component_types<T: Deref<Target=ComponentType>>(&self, component_types: impl IntoIterator<Item=T>) -> bool {
+        component_types.into_iter().all(|ct| self.has_component_type(&*ct))
     }
 }
 
