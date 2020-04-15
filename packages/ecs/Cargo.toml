@@ -12,5 +12,4 @@ async-trait = "0.1.24"
 futures = "0.3.4"
 arc-swap = "0.4.5"
 crossbeam-queue = "0.2.1"
-tokio = { version = "0.2.18", features = ["full"] }
 bit-vec = "0.6.1"

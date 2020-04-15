@@ -3,6 +3,7 @@
 use std::fmt::Display;
 use std::fmt::Debug;
 use std::sync::{Arc};
+use std::task::{Poll, Context};
 use std::cmp::{Ord};
 use futures::future::{self, FutureExt};
 use async_trait::async_trait;
@@ -123,6 +124,10 @@ struct SystemSetSystem {
     registration: SystemRegistration,
     token: SystemToken,
     phase: usize,
+    num_blockers: usize,
+    dep_count: usize,
+    inv_deps: Vec<usize>,
+    update_future: Option<future::BoxFuture<'static, ()>>,
 }
 
 impl SystemSetSystem {
@@ -131,15 +136,37 @@ impl SystemSetSystem {
             registration,
             token,
             phase: 0,
+            num_blockers: 0,
+            dep_count: 0,
+            inv_deps: Vec::new(),
+            update_future: None,
         }
     }
 
-    /// Spawn an execution of this system.
-    /// 
-    /// This is unsafe as you /must/ wait for the task to complete before using
-    /// this system for anything else.
-    pub async fn update(&mut self, writer: &SnapshotWriter) {
-        self.registration.system.update(writer).await
+    pub fn ready(&self) -> bool {
+        self.num_blockers == 0
+    }
+
+    pub fn reset(&mut self) {
+        self.num_blockers = self.dep_count;
+    }
+
+    pub fn start(&mut self, writer: &SnapshotWriter) {
+        let f = self.registration.system.update(writer);
+
+        unsafe {
+            match &mut self.update_future {
+                &mut None => self.update_future = std::mem::transmute(Some(f.boxed())),
+                &mut Some(ref mut fut) => *fut = std::mem::transmute(f),
+            }
+        }
+    }
+
+    pub fn poll(&mut self, cx: &mut Context) -> Poll<()> {
+        match &mut self.update_future {
+            Some(ref mut f) => f.as_mut().poll(cx),
+            None => Poll::Pending,
+        }
     }
 }
 
@@ -149,16 +176,18 @@ pub struct SystemSet {
     num_phases: usize,
     systems: Vec<SystemSetSystem>,
     systems_dirty: bool,
+    remapping: Vec<usize>,
 }
 
 impl SystemSet {
     /// Create a new empty `SystemSet`.
     pub fn new() -> SystemSet {
         SystemSet {
-            next_system_id: 1,
+            next_system_id: 0,
             num_phases: 0,
             systems: Vec::new(),
             systems_dirty: false,
+            remapping: Vec::new(),
         }
     }
 
@@ -166,7 +195,7 @@ impl SystemSet {
     pub fn insert(&mut self, system: SystemRegistration) -> Result<SystemToken, SystemRegistrationError> {
         let token = SystemToken(self.next_system_id);
         self.next_system_id += 1;
-        let system = SystemSetSystem::new(system, token);
+        let mut system = SystemSetSystem::new(system, token);
 
         let lo = system.registration.after.iter()
             .filter_map(|token| self.systems.binary_search_by_key(token, |r| r.token).ok())
@@ -176,14 +205,36 @@ impl SystemSet {
             .filter_map(|token| self.systems.binary_search_by_key(token, |r| r.token).ok())
             .min()
             .unwrap_or(self.systems.len());
-
-        if lo <= hi {
-            self.systems.insert(hi, system);
-            self.systems_dirty = true;
-            Ok(token)
-        } else {
-            Err(SystemRegistrationError)
+        
+        if lo > hi {
+            return Err(SystemRegistrationError)
         }
+
+        let index = self.systems.len();
+
+        for token in system.registration.after.iter() {
+            let sys = &mut self.systems[token.0];
+            if sys.inv_deps.contains(&index) {
+                continue;
+            }
+
+            system.dep_count += 1;
+            sys.inv_deps.push(index);
+        }
+
+        for token in system.registration.before.iter() {
+            if system.inv_deps.contains(&token.0) {
+                continue;
+            }
+
+            let sys = &mut self.systems[token.0];
+            sys.dep_count += 1;
+            system.inv_deps.push(token.0);
+        }
+
+        self.systems.insert(hi, system);
+        self.systems_dirty = true;
+        Ok(token)
     }
 
     fn update_systems(&mut self) {
@@ -192,8 +243,12 @@ impl SystemSet {
         let mut current_phase = 0;
 
         for sys in self.systems.iter_mut() {
-            sys.phase = current_phase;
-            current_phase += 1;
+            if sys.registration.barrier {
+                sys.phase = current_phase + 1;
+                current_phase = sys.phase + 1;
+            } else {
+                sys.phase = current_phase;
+            }
         }
         
         self.num_phases = current_phase + 1;
@@ -205,23 +260,87 @@ impl SystemSet {
             self.update_systems()
         }
 
-        let mut to_run = &mut self.systems[..];
+        let systems = &mut self.systems;
+        let remapping = &mut self.remapping;
+        let mut done = 0;
         let mut snapshot = world.snapshot();
 
+        remapping.clear();
+        remapping.extend(0..systems.len());
+
+        for sys in systems.iter_mut() {
+            sys.reset();
+        }
+
         for phase in 0..self.num_phases {
+            let end = done + remapping.iter()
+                .map(|idx| &systems[*idx])
+                .take_while(|sys| sys.phase <= phase)
+                .count();
+
             let writer = SnapshotWriter::new(snapshot);
-            let mut active_systems = Vec::with_capacity(to_run.len());
+            let mut running = 0;
+            let mut ready = 0;
 
-            while to_run.first().map_or(false, |s| s.phase <= phase) {
-                let (woken, rest) = to_run.split_first_mut().unwrap();
-                to_run = rest;
+            // Kick off all initially-ready systems.
+            for idx in done..end {
+                if systems[remapping[idx]].ready() {
+                    let write_idx = ready;
+                    ready += 1;
 
-                active_systems.push(woken.update(&writer).boxed());
+                    if write_idx != idx {
+                        let (a, b) = remapping.split_at_mut(idx);
+                        std::mem::swap(&mut a[write_idx], &mut b[0]);
+                    }
+                }
             }
 
-            future::join_all(&mut active_systems).await;
-            
-            drop(active_systems);
+            while done < end {
+                // Start new ready systems.
+                for idx in running..ready {
+                    systems[remapping[idx]].start(&writer);
+                }
+                running = ready;
+
+                // Wait for a system to be done.
+                let done_idx = future::poll_fn(|cx| {
+                    for idx in done..ready {
+                        let sys = &mut systems[remapping[idx]];
+                        if let Poll::Ready(_) = sys.poll(cx) {
+                            return Poll::Ready(idx);
+                        }
+                    }
+
+                    Poll::Pending
+                }).await;
+
+                if done_idx != done {
+                    let (a, b) = remapping.split_at_mut(done_idx);
+                    std::mem::swap(&mut a[done], &mut b[0]);
+                }
+
+                let num_to_wake = systems[remapping[done]].inv_deps.len();
+
+                // Prepare all now ready systems.
+                for idx_idx in 0..num_to_wake {
+                    let idx = systems[remapping[done]].inv_deps[idx_idx];
+                    let sys = &mut systems[idx];
+
+                    sys.num_blockers -= 1;
+
+                    if sys.ready() {
+                        if idx != ready {
+                            let (a, b) = remapping.split_at_mut(idx);
+                            std::mem::swap(&mut a[ready], &mut b[0]);
+                        }
+
+                        ready += 1;
+                    }
+                }
+
+                done += 1;
+            }
+
             snapshot = writer.into_inner();
         }
 
