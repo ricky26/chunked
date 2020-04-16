@@ -253,6 +253,7 @@ struct WorldGlobal {
 pub struct World {    
     global: Arc<WorldGlobal>,
     current_snapshot: ArcSwap<Snapshot>,
+    empty_snapshot: Arc<Snapshot>,
 }
 
 impl World {
@@ -271,17 +272,29 @@ impl World {
             next_entity_id: AtomicUsize::new(1),
             max_chunk_size: max_chunk_size,
         });
-        let current_snapshot = Snapshot::empty_for_global(Arc::downgrade(&global));
+
+        let empty_snapshot = Arc::new(Snapshot::empty_for_global(Arc::downgrade(&global)));
+        let current_snapshot = ArcSwap::new(empty_snapshot.clone());
 
         World {
             global,
-            current_snapshot: ArcSwap::from_pointee(current_snapshot),
+            empty_snapshot,
+            current_snapshot,
         }
     }
 
     /// Create a snapshot of the current world state.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.current_snapshot.load_full()
+    }
+
+    /// Take the current snapshot of the world and clear it.
+    /// 
+    /// Generally this is designed to be used as a performance optimisation:
+    /// if nobody else has a reference to the Snapshot, it can be modified
+    /// freely.
+    pub fn take_snapshot(&self) -> Arc<Snapshot> {
+        self.current_snapshot.swap(self.empty_snapshot.clone())
     }
 
     /// Set the current state of the world.
@@ -293,8 +306,7 @@ impl World {
 
     /// Clear all entities from the world.
     pub fn clear(&self) {
-        let snapshot = Arc::new(Snapshot::empty_for_global(Arc::downgrade(&self.global)));
-        self.current_snapshot.store(snapshot);
+        self.current_snapshot.store(self.empty_snapshot.clone());
     }
 
     /// Get a archetype with the given component types, providing it already
