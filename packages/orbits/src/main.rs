@@ -38,64 +38,52 @@ pub struct ApplyNewtonianAccel;
 
 #[async_trait]
 impl System for ApplyNewtonianAccel {
-    async fn update(&mut self, writer: &SnapshotWriter) {
-        let writer: &'static SnapshotWriter = unsafe { std::mem::transmute(writer) };
+    async fn update(&mut self, writer: SnapshotWriter) {
         let snapshot = writer.snapshot();
 
         tokio::task::spawn_blocking(move || {
-            (0..writer.num_chunks()).into_par_iter()
-                .for_each(|chunk_index_a| {
-                    let mut chunk_a = writer.borrow_chunk_mut(chunk_index_a);
-                    let mut chunk_writer = chunk_a.writer();
+            writer.par_iter_chunks_mut()
+                .for_each(|mut chunk_a| {
+                    let mut chunk_splitter = chunk_a.split();
+                    let ids_a = chunk_splitter.get_components::<EntityID>().unwrap();
+                    let positions_a = chunk_splitter.get_components::<Position>().unwrap();
+                    let velocities_a = chunk_splitter.get_components_mut::<Velocity>().unwrap();
 
-                    let ids_a = chunk_writer.get_components::<EntityID>().unwrap();
-                    let positions_a = chunk_writer.get_components::<Position>().unwrap();
-                    let masses_a = chunk_writer.get_components_mut::<Mass>().unwrap();
-                    let velocities_a = chunk_writer.get_components_mut::<Velocity>().unwrap();
+                    (ids_a, velocities_a, positions_a).into_par_iter()
+                        .for_each(|(id_a, Velocity(ref mut vx_a, ref mut vy_a, ref mut vz_a), Position(x_a, y_a, z_a))| {
+                            let (vxd, vyd, vzd) = snapshot.par_iter_chunks()
+                                .flat_map(|chunk_b| {
+                                    let ids_b = chunk_b.get_components::<EntityID>().unwrap();
+                                    let positions_b = chunk_b.get_components::<Position>().unwrap();
+                                    let masses_b = chunk_b.get_components::<Mass>().unwrap();
 
-                    ids_a.into_par_iter()
-                        .zip(velocities_a.into_par_iter())
-                        .zip(masses_a.into_par_iter())
-                        .zip(positions_a.into_par_iter())
-                        .for_each(|(((id_a, Velocity(ref mut vx_a, ref mut vy_a, ref mut vz_a)), Mass(ref mut m_a)), Position(x_a, y_a, z_a))| {        
-                            if *m_a < 0.00001 {
-                                return;
-                            }
-                            
-                            for chunk_b in snapshot.iter_chunks() {
-                                let ids_b = chunk_b.get_components::<EntityID>().unwrap();
-                                let positions_b = chunk_b.get_components::<Position>().unwrap();
-                                let masses_b = chunk_b.get_components::<Mass>().unwrap();
-
-                                let (vxd, vyd, vzd) = ids_b.into_par_iter()
-                                    .zip(masses_b.into_par_iter())
-                                    .zip(positions_b.into_par_iter())
-                                    .filter(|((id_b, Mass(m_b)), _)| (*id_b != id_a) && (*m_b >= 0.00001))
-                                    .map(|((_, Mass(m_b)), Position(x_b, y_b, z_b))| {
-                                        let dx = x_b - x_a;
-                                        let dy = y_b - y_a;
-                                        let dz = z_b - z_a;
-                                        let r2 = dx * dx + dy * dy + dz * dz;
-            
-                                        // Bodies are overlapped!
-                                        if r2 < 0.0005 {
-                                            (0.0, 0.0, 0.0)
-                                        } else {
-                                            let a = (G * m_b) / r2;
-                                            let r = r2.sqrt();
-                                            let vx = TIME_STEP * ((dx * a) / r);
-                                            let vy = TIME_STEP * ((dy * a) / r);
-                                            let vz = TIME_STEP * ((dz * a) / r);
-                                            (vx, vy, vz)
-                                        }
-                                    })
-                                    .reduce(|| (0.0, 0.0, 0.0),
-                                        |(a, b, c), (d, e, f)| (a + d, b + e, c + f));
-                                    
+                                    (ids_b, masses_b, positions_b).into_par_iter()
+                                        .filter(|(id_b, Mass(m_b), ..)| (*id_b != id_a) && (*m_b >= 0.00001))
+                                        .map(|(_, Mass(m_b), Position(x_b, y_b, z_b))| {
+                                            let dx = x_b - x_a;
+                                            let dy = y_b - y_a;
+                                            let dz = z_b - z_a;
+                                            let r2 = dx * dx + dy * dy + dz * dz;
+                
+                                            // Bodies are overlapped!
+                                            if r2 < 0.0005 {
+                                                (0.0, 0.0, 0.0)
+                                            } else {
+                                                let a = (G * m_b) / r2;
+                                                let r = r2.sqrt();
+                                                let vx = TIME_STEP * ((dx * a) / r);
+                                                let vy = TIME_STEP * ((dy * a) / r);
+                                                let vz = TIME_STEP * ((dz * a) / r);
+                                                (vx, vy, vz)
+                                            }
+                                        })
+                                })
+                                .reduce(|| (0.0, 0.0, 0.0),
+                                    |(a, b, c), (d, e, f)| (a + d, b + e, c + f));
+                                        
                                 *vx_a += vxd;
                                 *vy_a += vyd;
                                 *vz_a += vzd;
-                            }
                         });
                 });
         }).await.unwrap();
@@ -106,7 +94,7 @@ pub struct ApplyVelocity;
 
 #[async_trait]
 impl System for ApplyVelocity {
-    async fn update(&mut self, writer: &SnapshotWriter) {
+    async fn update(&mut self, writer: SnapshotWriter) {
         let component_types = &[
             ComponentType::for_type::<Velocity>(),
             ComponentType::for_type::<Position>(),
@@ -115,9 +103,9 @@ impl System for ApplyVelocity {
             .filter(|c| c.zone().archetype().has_all_component_types(component_types));
 
         for mut chunk in chunks {
-            let mut chunk_writer = chunk.writer();
-            let velocities = chunk_writer.get_components::<Velocity>().unwrap();
-            let positions = chunk_writer.get_components_mut::<Position>().unwrap();
+            let mut chunk_splitter = chunk.split();
+            let velocities = chunk_splitter.get_components::<Velocity>().unwrap();
+            let positions = chunk_splitter.get_components_mut::<Position>().unwrap();
 
             for entity_idx in 0..positions.len() {
                 let Velocity(vx, vy, vz) = velocities[entity_idx];

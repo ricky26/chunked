@@ -4,8 +4,16 @@ use std::ops::{Deref, DerefMut};
 use std::fmt::{self, Debug};
 use std::sync::{self, Arc, Weak, atomic::{self, AtomicUsize}};
 use std::cmp::{Ord, Ordering};
+use futures::channel::oneshot;
 use arc_swap::{ArcSwap};
 use bit_vec::BitVec;
+
+#[cfg(feature = "rayon")]
+use rayon::iter::{
+    ParallelIterator,
+    IntoParallelIterator,
+    IntoParallelRefIterator,
+};
 
 use crate::sorted_vec::{VecSet, VecMap};
 use crate::entity::{
@@ -46,58 +54,78 @@ enum SnapshotWriterState {
     },
 }
 
+impl SnapshotWriterState {
+    /// Get the current snapshot stored by this state.
+    pub fn snapshot(&self) -> &Arc<Snapshot> {
+        match self {
+            &SnapshotWriterState::Original(ref snapshot) => snapshot,
+            &SnapshotWriterState::Replace(ref snapshot) => snapshot,
+            &SnapshotWriterState::ChunkWise { ref snapshot, .. } => snapshot,
+        }
+    }
+}
+
+struct SnapshotWriterInner {
+    num_chunks: usize,
+    contents: sync::Mutex<SnapshotWriterState>,
+    cond: sync::Condvar,
+    drop_tx: Option<oneshot::Sender<Arc<Snapshot>>>
+}
+
+impl Drop for SnapshotWriterInner {
+    fn drop(&mut self) {
+        if let Some(tx) = self.drop_tx.take() {
+            let mut contents = self.contents.lock().unwrap();
+            let snap = contents.snapshot().clone();
+            let empty_snap = Arc::new(Snapshot::empty_for_global(snap.global().clone()));
+            *contents = SnapshotWriterState::Original(empty_snap);
+            tx.send(snap).ok();
+        }
+    }
+}
+
 /// A writer for modifying snapshots.
 /// 
 /// This can be used in one of two ways:
 /// - As a simple `Snapshot` reference.
 /// - As a chunk-wise writer (which allows parallel writing).
+#[derive(Clone)]
 pub struct SnapshotWriter {
-    num_chunks: usize,
-    contents: sync::Mutex<SnapshotWriterState>,
-    cond: sync::Condvar,
+    inner: Arc<SnapshotWriterInner>,
 }
 
 impl SnapshotWriter {
     /// Create a new `SnapshotWriter` with the given starting state.
-    pub fn new(snapshot: Arc<Snapshot>) -> SnapshotWriter {
+    pub fn new(snapshot: Arc<Snapshot>) -> (SnapshotWriter, oneshot::Receiver<Arc<Snapshot>>) {
+        let (drop_tx, drop_rx) = oneshot::channel();
         let num_chunks = snapshot.chunk_sets.iter()
             .map(|cs| cs.chunks().len())
             .sum();
-
-        SnapshotWriter {
+        
+        let inner = Arc::new(SnapshotWriterInner {
             num_chunks,
             contents: sync::Mutex::new(SnapshotWriterState::Original(snapshot)),
             cond: sync::Condvar::new(),
-        }
+            drop_tx: Some(drop_tx),
+        });
+
+        (SnapshotWriter { inner }, drop_rx)
     }
 
-    /// Get the base snapshot this writer was based upon.
+    /// Get the snapshot this writer currently holds.
     pub fn snapshot(&self) -> Arc<Snapshot> {
-        let contents = self.contents.lock().unwrap();
-        match &*contents {
-            &SnapshotWriterState::Original(ref snapshot) => snapshot.clone(),
-            &SnapshotWriterState::Replace(ref snapshot) => snapshot.clone(),
-            &SnapshotWriterState::ChunkWise { ref snapshot, .. } => snapshot.clone(),
-        }
-    }
-
-    /// Deconstruct this writer and return the resultant snapshot.
-    pub fn into_inner(self) -> Arc<Snapshot> {
-        match self.contents.into_inner().unwrap() {
-            SnapshotWriterState::Original(snapshot) => snapshot,
-            SnapshotWriterState::Replace(snapshot) => snapshot,
-            SnapshotWriterState::ChunkWise { snapshot, .. } => snapshot,
-        }
+        let contents = self.inner.contents.lock().unwrap();
+        contents.snapshot().clone()
     }
 
     /// Return the number of chunks covered by this writer.
     pub fn num_chunks(&self) -> usize {
-        self.num_chunks
+        self.inner.num_chunks
     }
 
     /// Set the final snapshot directly.
     pub fn set_snapshot(&self, snapshot: Arc<Snapshot>) {
-        let mut contents = self.contents.lock().unwrap();
+        let mut contents = self.inner.contents.lock().unwrap();
 
         // Take exclusive lock!
         loop {
@@ -106,7 +134,7 @@ impl SnapshotWriter {
                 &mut SnapshotWriterState::Replace(_) => {},
                 &mut SnapshotWriterState::ChunkWise {ref locked, .. } => {
                     if locked.any() {
-                        contents = self.cond.wait(contents).unwrap();
+                        contents = self.inner.cond.wait(contents).unwrap();
                         continue;
                     }
 
@@ -120,9 +148,15 @@ impl SnapshotWriter {
         *contents = SnapshotWriterState::Replace(snapshot);
     }
 
+    /// Create a parallel iterator over all chunks with mutable references.
+    #[cfg(feature = "rayon")]
+    pub fn par_iter_chunks_mut(&self) -> impl ParallelIterator<Item=SnapshotWriterGuard> + '_ {
+        (0..self.inner.num_chunks).into_par_iter().map(move |idx| self.borrow_chunk_mut(idx))
+    }
+
     /// Iterate through all chunks with mutable references.
     pub fn iter_chunks_mut(&self) -> impl Iterator<Item=SnapshotWriterGuard> + '_ {
-        (0..self.num_chunks).map(move |idx| self.borrow_chunk_mut(idx))
+        (0..self.inner.num_chunks).map(move |idx| self.borrow_chunk_mut(idx))
     }
 
     /// Borrow a single chunk mutably.
@@ -130,14 +164,14 @@ impl SnapshotWriter {
     /// This method cannot be used if `set_snapshot` has been called.
     pub fn borrow_chunk_mut(&self, index: usize) -> SnapshotWriterGuard {
         let (chunk_set, chunk_index) = loop {
-            let mut contents = self.contents.lock().unwrap();
+            let mut contents = self.inner.contents.lock().unwrap();
 
             let (snapshot, locked) = match &mut *contents {
                 &mut SnapshotWriterState::Original(ref snapshot) => {
                     // Starting chunk-wise lock.
                     *contents = SnapshotWriterState::ChunkWise {
                         snapshot: snapshot.clone(),
-                        locked: BitVec::from_elem(self.num_chunks, false),
+                        locked: BitVec::from_elem(self.inner.num_chunks, false),
                     };
                     continue;
                 },
@@ -171,7 +205,7 @@ impl SnapshotWriter {
                 .sum::<usize>() + chunk_index;
 
             if locked[index] {
-                let _ = self.cond.wait(contents).unwrap();
+                let _ = self.inner.cond.wait(contents).unwrap();
             } else {
                 locked.set(index, true);
                 let snapshot_mut = Arc::make_mut(snapshot);
@@ -194,7 +228,7 @@ impl SnapshotWriter {
 
     /// Free a chunk previously locked by `borrow_chunk_mut`.
     fn free_chunk(&self, index: usize) {
-        let mut contents = self.contents.lock().unwrap();
+        let mut contents = self.inner.contents.lock().unwrap();
 
         match &mut *contents {
             &mut SnapshotWriterState::ChunkWise { ref mut locked, .. } =>
@@ -202,7 +236,7 @@ impl SnapshotWriter {
             _ => unreachable!(),
         }
 
-        self.cond.notify_all();
+        self.inner.cond.notify_all();
     }
 }
 
@@ -447,6 +481,12 @@ impl Snapshot {
     /// Get a weak reference to the owning global of this snapshot.
     fn global(&self) -> &Weak<WorldGlobal> {
         &self.global
+    }
+
+    /// Create a parallel iterator over the chunks in the snapshot.
+    #[cfg(feature = "rayon")]
+    pub fn par_iter_chunks(&self) -> impl ParallelIterator<Item=&Arc<Chunk>> {
+        self.chunk_sets.par_iter().flat_map(|cs| cs.chunks())
     }
 
     /// Create an iterator over all the chunks in the snapshot.

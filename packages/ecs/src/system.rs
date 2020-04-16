@@ -17,7 +17,7 @@ pub trait System {
     /// Update the system.
     /// 
     /// Any changes to the world will be represented in `writer`.
-    async fn update(&mut self, writer: &SnapshotWriter);
+    async fn update(&mut self, writer: SnapshotWriter);
 }
 
 /// A token which represents a system in a `SystemSet`.
@@ -151,7 +151,7 @@ impl SystemSetSystem {
         self.num_blockers = self.dep_count;
     }
 
-    pub fn start(&mut self, writer: &SnapshotWriter) {
+    pub fn start(&mut self, writer: SnapshotWriter) {
         let f = self.registration.system.update(writer);
 
         unsafe {
@@ -278,7 +278,7 @@ impl SystemSet {
                 .take_while(|sys| sys.phase <= phase)
                 .count();
 
-            let writer = SnapshotWriter::new(snapshot);
+            let (writer, reader) = SnapshotWriter::new(snapshot);
             let mut running = 0;
             let mut ready = 0;
 
@@ -298,7 +298,7 @@ impl SystemSet {
             while done < end {
                 // Start new ready systems.
                 for idx in running..ready {
-                    systems[remapping[idx]].start(&writer);
+                    systems[remapping[idx]].start(writer.clone());
                 }
                 running = ready;
 
@@ -341,7 +341,8 @@ impl SystemSet {
                 done += 1;
             }
 
-            snapshot = writer.into_inner();
+            drop(writer);
+            snapshot = reader.await.unwrap();
         }
 
         world.set_snapshot(snapshot);

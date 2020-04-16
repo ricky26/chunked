@@ -245,10 +245,10 @@ impl Chunk {
         })
     }
 
-    /// Create a new `ChunkWriter` for accessing multiple component lists at the
+    /// Create a new `ChunkSplitter` for accessing multiple component lists at the
     /// same time.
-    pub fn writer(&mut self) -> ChunkWriter {
-        ChunkWriter::new(self)
+    pub fn split(&mut self) -> ChunkSplitter {
+        ChunkSplitter::new(self)
     }
 
     /// Replace an entity in this chunk with the contents of a `ComponentSource`.
@@ -406,18 +406,18 @@ impl Drop for Chunk {
 /// component types in the same chunk at the same time.
 /// 
 /// At the moment, it is impossible to get two references to the same component
-/// slice from `ChunkWriter` mutable or not.
-pub struct ChunkWriter<'a> {
+/// slice from `ChunkSplitter` mutable or not.
+pub struct ChunkSplitter<'a> {
     chunk: &'a mut Chunk,
     locked: BitVec,
 }
 
-impl<'a> ChunkWriter<'a> {
-    /// Construct a new `ChunkWriter` from a mutable `Chunk` reference.
-    pub fn new(chunk: &mut Chunk) -> ChunkWriter {
+impl<'a> ChunkSplitter<'a> {
+    /// Construct a new `ChunkSplitter` from a mutable `Chunk` reference.
+    pub fn new(chunk: &mut Chunk) -> ChunkSplitter {
         let num_components = chunk.zone().archetype().component_types().len();
 
-        ChunkWriter{
+        ChunkSplitter{
             chunk,
             locked: BitVec::from_elem(num_components, false),
         }

@@ -34,20 +34,20 @@ pub struct ApplyNewtonianAccel;
 
 #[async_trait]
 impl System for ApplyNewtonianAccel {
-    async fn update(&mut self, writer: &SnapshotWriter) {
+    async fn update(&mut self, writer: SnapshotWriter) {
         let snapshot = writer.snapshot();
 
         for chunk_index_a in 0..writer.num_chunks() {
             let mut chunk_a = writer.borrow_chunk_mut(chunk_index_a);
-            let mut chunk_writer = chunk_a.writer();
-            let positions_a = chunk_writer.get_components::<Position>().unwrap();
-            let masses_a = chunk_writer.get_components_mut::<Mass>().unwrap();
-            let velocities_a = chunk_writer.get_components_mut::<Velocity>().unwrap();
+            let mut chunk_splitter = chunk_a.split();
+            let positions_a = chunk_splitter.get_components::<Position>().unwrap();
+            let masses_a = chunk_splitter.get_components_mut::<Mass>().unwrap();
+            let velocities_a = chunk_splitter.get_components_mut::<Velocity>().unwrap();
 
             for entity_a in 0..positions_a.len() {                
                 let Mass(ref mut m_a) = masses_a[entity_a];
                 let Position(x_a, y_a) = positions_a[entity_a];
-
+                        
                 if *m_a < 0.00001 {
                     continue;
                 }
@@ -96,7 +96,7 @@ pub struct ApplyVelocity;
 
 #[async_trait]
 impl System for ApplyVelocity {
-    async fn update(&mut self, writer: &SnapshotWriter) {
+    async fn update(&mut self, writer: SnapshotWriter) {
         let component_types = &[
             ComponentType::for_type::<Velocity>(),
             ComponentType::for_type::<Position>(),
@@ -105,9 +105,9 @@ impl System for ApplyVelocity {
             .filter(|c| c.zone().archetype().has_all_component_types(component_types));
 
         for mut chunk in chunks {
-            let mut chunk_writer = chunk.writer();
-            let velocities = chunk_writer.get_components::<Velocity>().unwrap();
-            let positions = chunk_writer.get_components_mut::<Position>().unwrap();
+            let mut chunk_splitter = chunk.split();
+            let velocities = chunk_splitter.get_components::<Velocity>().unwrap();
+            let positions = chunk_splitter.get_components_mut::<Position>().unwrap();
 
             for entity_idx in 0..positions.len() {
                 let Velocity(vx, vy) = velocities[entity_idx];
