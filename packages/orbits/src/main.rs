@@ -2,7 +2,7 @@ use std::sync::Arc;
 use glutin_window::GlutinWindow as Window;
 use opengl_graphics::{GlGraphics, OpenGL};
 use piston::event_loop::{EventSettings, Events};
-use piston::input::{RenderEvent};
+use piston::input::{RenderEvent, CloseEvent};
 use piston::window::WindowSettings;
 use async_trait::async_trait;
 use rand::Rng;
@@ -183,6 +183,10 @@ fn render_thread(world: Arc<World>) {
                 }
             });
         }
+
+        if let Some(_) = e.close_args() {
+            std::process::exit(0);
+        }
     }
 }
 
@@ -198,7 +202,7 @@ async fn main() {
     // Populate universe!
     {
         const NUM_ENTITIES: usize = 2048;
-        const VEL_SCALE: f32 = 0.0005;
+        const VEL_SCALE: f32 = 0.001;
 
         let mut command_buffer = CommandBuffer::new(world.clone());
         let mut rng = rand::thread_rng();
@@ -212,8 +216,10 @@ async fn main() {
             let vy = VEL_SCALE * (rng.gen::<f32>() * 2.0 - 1.0);
             let vz = VEL_SCALE * (rng.gen::<f32>() * 2.0 - 1.0);
 
+            let m = 1.0 + (50.0 * rng.gen::<f32>());
+
             let id = command_buffer.new_entity(arch.clone());
-            command_buffer.set_component(id, Mass(10.0));
+            command_buffer.set_component(id, Mass(m));
             command_buffer.set_component(id, Position(x, y, z));
             command_buffer.set_component(id, Velocity(vx, vy, vz));
         }
