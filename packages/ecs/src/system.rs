@@ -2,14 +2,17 @@
 
 use std::fmt::Display;
 use std::fmt::Debug;
+use std::pin::Pin;
 use std::sync::{Arc};
+use std::future::Future;
 use std::task::{Poll, Context};
 use std::cmp::{Ord};
-use futures::future::{self, FutureExt};
+use futures::future;
 use async_trait::async_trait;
 
 use crate::entity::{Component, ComponentType,};
 use crate::world::{SnapshotWriter, World};
+use crate::reusable::{Reusable, ReusableAlloc};
 
 /// An ECS system.
 #[async_trait]
@@ -120,26 +123,34 @@ impl Display for SystemRegistrationError {
 impl std::error::Error for SystemRegistrationError {
 }
 
+type BoxedSystemUpdate = Reusable<dyn Future<Output=BoxedSystem>>;
+
+enum SystemState {
+    Invalid,
+    Idle(BoxedSystem, ReusableAlloc),
+    Running(BoxedSystemUpdate),
+}
+
 struct SystemSetSystem {
-    registration: SystemRegistration,
-    token: SystemToken,
+    state: SystemState,
+    barrier: bool,
     phase: usize,
     num_blockers: usize,
     dep_count: usize,
     inv_deps: Vec<usize>,
-    update_future: Option<future::BoxFuture<'static, ()>>,
 }
 
 impl SystemSetSystem {
-    pub fn new(registration: SystemRegistration, token: SystemToken) -> SystemSetSystem {
+    pub fn new(system: BoxedSystem) -> SystemSetSystem {
+        let state = SystemState::Idle(system, ReusableAlloc::empty());
+
         SystemSetSystem {
-            registration,
-            token,
+            state,
+            barrier: false,
             phase: 0,
             num_blockers: 0,
             dep_count: 0,
             inv_deps: Vec::new(),
-            update_future: None,
         }
     }
 
@@ -152,21 +163,49 @@ impl SystemSetSystem {
     }
 
     pub fn start(&mut self, writer: SnapshotWriter) {
-        let f = self.registration.system.update(writer);
+        let state = std::mem::replace(&mut self.state, SystemState::Invalid);
+        self.state = match state {
+            SystemState::Idle(mut system, alloc) => {
+                let f = async {
+                    system.update(writer).await;
+                    system
+                };
 
-        unsafe {
-            match &mut self.update_future {
-                &mut None => self.update_future = std::mem::transmute(Some(f.boxed())),
-                &mut Some(ref mut fut) => *fut = std::mem::transmute(f),
-            }
-        }
+                // Some unsafe magic to finangle our custom pointer type
+                // into a trait object.
+                let alloc = Reusable::from_alloc(alloc, f);
+                let ptr = alloc.as_ptr();
+                let layout = alloc.layout();
+                std::mem::forget(alloc);
+
+                let boxed = unsafe {
+                    let ptr = ptr as *mut dyn Future<Output=BoxedSystem>;
+                    let ptr = std::ptr::NonNull::new_unchecked(ptr);
+
+                    Reusable::from_raw(ptr, layout)
+                };
+                
+                SystemState::Running(boxed)
+            },
+            x => x,
+        };
     }
 
     pub fn poll(&mut self, cx: &mut Context) -> Poll<()> {
-        match &mut self.update_future {
-            Some(ref mut f) => f.as_mut().poll(cx),
-            None => Poll::Pending,
-        }
+        let state = std::mem::replace(&mut self.state, SystemState::Invalid);
+        let (new_state, ret) = match state {
+            SystemState::Running(mut f) => {
+                match Pin::new(&mut f).poll(cx) {
+                    Poll::Ready(ptr) =>
+                        (SystemState::Idle(ptr, f.free()), Poll::Ready(())),
+                    Poll::Pending =>
+                        (SystemState::Running(f), Poll::Pending),
+                }
+            },
+            _ => (state, Poll::Pending),
+        };
+        self.state = new_state;
+        ret
     }
 }
 
@@ -174,9 +213,11 @@ impl SystemSetSystem {
 pub struct SystemSet {
     next_system_id: usize,
     num_phases: usize,
+
     systems: Vec<SystemSetSystem>,
-    systems_dirty: bool,
+    sorted_systems: Vec<usize>,
     remapping: Vec<usize>,
+    systems_dirty: bool,
 }
 
 impl SystemSet {
@@ -185,24 +226,40 @@ impl SystemSet {
         SystemSet {
             next_system_id: 0,
             num_phases: 0,
+
             systems: Vec::new(),
-            systems_dirty: false,
+            sorted_systems: Vec::new(),
             remapping: Vec::new(),
+            systems_dirty: false,
         }
     }
 
     /// Insert a system to the set according to its registration requirements.
-    pub fn insert(&mut self, system: SystemRegistration) -> Result<SystemToken, SystemRegistrationError> {
+    pub fn insert(&mut self, registration: SystemRegistration) -> Result<SystemToken, SystemRegistrationError> {
         let token = SystemToken(self.next_system_id);
         self.next_system_id += 1;
-        let mut system = SystemSetSystem::new(system, token);
+        let mut system = SystemSetSystem::new(registration.system);
+        system.barrier = registration.barrier;
 
-        let lo = system.registration.after.iter()
-            .filter_map(|token| self.systems.binary_search_by_key(token, |r| r.token).ok())
+        let after_indices = match registration.after.iter()
+            .map(|token| self.sorted_systems.iter().cloned().filter(|idx| *idx == token.0).next())
+            .collect::<Option<Vec<_>>>() {
+            Some(x) => x,
+            None => Err(SystemRegistrationError)?,
+        };
+        let before_indices = match registration.before.iter()
+            .map(|token| self.sorted_systems.iter().cloned().filter(|idx| *idx == token.0).next())
+            .collect::<Option<Vec<_>>>() {
+            Some(x) => x,
+            None => Err(SystemRegistrationError)?,
+        };
+
+        let lo = after_indices.iter()
+            .cloned()
             .max()
             .unwrap_or(0);
-        let hi = system.registration.before.iter()
-            .filter_map(|token| self.systems.binary_search_by_key(token, |r| r.token).ok())
+        let hi = before_indices.iter()
+            .cloned()
             .min()
             .unwrap_or(self.systems.len());
         
@@ -212,7 +269,7 @@ impl SystemSet {
 
         let index = self.systems.len();
 
-        for token in system.registration.after.iter() {
+        for token in registration.after.iter() {
             let sys = &mut self.systems[token.0];
             if sys.inv_deps.contains(&index) {
                 continue;
@@ -222,7 +279,7 @@ impl SystemSet {
             sys.inv_deps.push(index);
         }
 
-        for token in system.registration.before.iter() {
+        for token in registration.before.iter() {
             if system.inv_deps.contains(&token.0) {
                 continue;
             }
@@ -232,7 +289,8 @@ impl SystemSet {
             system.inv_deps.push(token.0);
         }
 
-        self.systems.insert(hi, system);
+        self.systems.push(system);
+        self.sorted_systems.insert(hi, index);
         self.systems_dirty = true;
         Ok(token)
     }
@@ -243,7 +301,7 @@ impl SystemSet {
         let mut current_phase = 0;
 
         for sys in self.systems.iter_mut() {
-            if sys.registration.barrier {
+            if sys.barrier {
                 sys.phase = current_phase + 1;
                 current_phase = sys.phase + 1;
             } else {
