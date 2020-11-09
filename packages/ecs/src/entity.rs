@@ -20,9 +20,6 @@ static mut NEXT_TYPE_ID: AtomicUsize = AtomicUsize::new(1);
 
 impl ComponentTypeID {
     /// Construct a new `ComponentTypeID` from the inner value.
-    /// 
-    /// This function is unsafe as it can allow you to create a ComponentTypeID
-    /// which mirrors an existing type.
     pub fn new(inner: usize) -> ComponentTypeID {
         ComponentTypeID(inner)
     }

@@ -304,7 +304,7 @@ impl World {
 
             next_zone_id: AtomicUsize::new(1),
             next_entity_id: AtomicUsize::new(1),
-            max_chunk_size: max_chunk_size,
+            max_chunk_size,
         });
 
         let empty_snapshot = Arc::new(Snapshot::empty_for_global(Arc::downgrade(&global)));
@@ -678,7 +678,7 @@ impl CommandBuffer {
         let update_entities = &self.update_entities;
         let component_storage = &self.component_storage;
 
-        // TODO: This is a prime opportunity for parellelism.
+        // TODO: This is a prime opportunity for parallelism.
         for chunk_set_index in 0..snapshot.chunk_sets.len() {
             let mut chunk_set = &snapshot.chunk_sets[chunk_set_index];
             let zone = chunk_set.zone();
