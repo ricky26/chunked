@@ -1,30 +1,21 @@
 //! A world which can hold entities.
 
-use std::ops::{Deref, DerefMut};
 use std::fmt::{self, Debug};
-use std::sync::{self, Arc, Weak, atomic::{self, AtomicUsize}};
-use std::cmp::{Ord, Ordering};
-use futures::channel::oneshot;
+use std::sync::{Arc, atomic};
+use std::cmp::Ordering;
 use arc_swap::{ArcSwap};
-use bit_vec::BitVec;
 
-#[cfg(feature = "rayon")]
-use rayon::iter::{
-    ParallelIterator,
-    IntoParallelIterator,
-    IntoParallelRefIterator,
-};
-
-use crate::sorted_vec::{VecSet, VecMap};
+use crate::sorted_vec::{VecMap};
+use crate::chunk::{Zone, ChunkSet};
+use crate::universe::Universe;
 use crate::entity::{
     Component,
     ComponentType,
     ComponentSource,
     Archetype,
     EntityID,
-    EntityComponentIterator,
 };
-use crate::chunk::{Zone, Chunk, ChunkSet};
+use crate::snapshot::Snapshot;
 
 /// Return the first of the two options sorted by value.
 fn option_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
@@ -45,237 +36,6 @@ fn option_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
     }
 }
 
-enum SnapshotWriterState {
-    Original(Arc<Snapshot>),
-    Replace(Arc<Snapshot>),
-    ChunkWise {
-        snapshot: Arc<Snapshot>,
-        locked: BitVec,
-    },
-}
-
-impl SnapshotWriterState {
-    /// Get the current snapshot stored by this state.
-    pub fn snapshot(&self) -> &Arc<Snapshot> {
-        match self {
-            &SnapshotWriterState::Original(ref snapshot) => snapshot,
-            &SnapshotWriterState::Replace(ref snapshot) => snapshot,
-            &SnapshotWriterState::ChunkWise { ref snapshot, .. } => snapshot,
-        }
-    }
-}
-
-struct SnapshotWriterInner {
-    num_chunks: usize,
-    contents: sync::Mutex<SnapshotWriterState>,
-    cond: sync::Condvar,
-    drop_tx: Option<oneshot::Sender<Arc<Snapshot>>>
-}
-
-impl Drop for SnapshotWriterInner {
-    fn drop(&mut self) {
-        if let Some(tx) = self.drop_tx.take() {
-            let mut contents = self.contents.lock().unwrap();
-            let snap = contents.snapshot().clone();
-            let empty_snap = Arc::new(Snapshot::empty_for_global(snap.global().clone()));
-            *contents = SnapshotWriterState::Original(empty_snap);
-            tx.send(snap).ok();
-        }
-    }
-}
-
-/// A writer for modifying snapshots.
-/// 
-/// This can be used in one of two ways:
-/// - As a simple `Snapshot` reference.
-/// - As a chunk-wise writer (which allows parallel writing).
-#[derive(Clone)]
-pub struct SnapshotWriter {
-    inner: Arc<SnapshotWriterInner>,
-}
-
-impl SnapshotWriter {
-    /// Create a new `SnapshotWriter` with the given starting state.
-    pub fn new(snapshot: Arc<Snapshot>) -> (SnapshotWriter, oneshot::Receiver<Arc<Snapshot>>) {
-        let (drop_tx, drop_rx) = oneshot::channel();
-        let num_chunks = snapshot.chunk_sets.iter()
-            .map(|cs| cs.chunks().len())
-            .sum();
-        
-        let inner = Arc::new(SnapshotWriterInner {
-            num_chunks,
-            contents: sync::Mutex::new(SnapshotWriterState::Original(snapshot)),
-            cond: sync::Condvar::new(),
-            drop_tx: Some(drop_tx),
-        });
-
-        (SnapshotWriter { inner }, drop_rx)
-    }
-
-    /// Get the snapshot this writer currently holds.
-    pub fn snapshot(&self) -> Arc<Snapshot> {
-        let contents = self.inner.contents.lock().unwrap();
-        contents.snapshot().clone()
-    }
-
-    /// Return the number of chunks covered by this writer.
-    pub fn num_chunks(&self) -> usize {
-        self.inner.num_chunks
-    }
-
-    /// Set the final snapshot directly.
-    pub fn set_snapshot(&self, snapshot: Arc<Snapshot>) {
-        let mut contents = self.inner.contents.lock().unwrap();
-
-        // Take exclusive lock!
-        loop {
-            match &mut *contents {
-                &mut SnapshotWriterState::Original(_) |
-                &mut SnapshotWriterState::Replace(_) => {},
-                &mut SnapshotWriterState::ChunkWise {ref locked, .. } => {
-                    if locked.any() {
-                        contents = self.inner.cond.wait(contents).unwrap();
-                        continue;
-                    }
-
-                    break;
-                },
-            };
-
-            break;
-        }
-
-        *contents = SnapshotWriterState::Replace(snapshot);
-    }
-
-    /// Create a parallel iterator over all chunks with mutable references.
-    #[cfg(feature = "rayon")]
-    pub fn par_iter_chunks_mut(&self) -> impl ParallelIterator<Item=SnapshotWriterGuard> + '_ {
-        (0..self.inner.num_chunks).into_par_iter().map(move |idx| self.borrow_chunk_mut(idx))
-    }
-
-    /// Iterate through all chunks with mutable references.
-    pub fn iter_chunks_mut(&self) -> impl Iterator<Item=SnapshotWriterGuard> + '_ {
-        (0..self.inner.num_chunks).map(move |idx| self.borrow_chunk_mut(idx))
-    }
-
-    /// Borrow a single chunk mutably.
-    /// 
-    /// This method cannot be used if `set_snapshot` has been called.
-    pub fn borrow_chunk_mut(&self, index: usize) -> SnapshotWriterGuard {
-        let (chunk_set, chunk_index) = loop {
-            let mut contents = self.inner.contents.lock().unwrap();
-
-            let (snapshot, locked) = match &mut *contents {
-                &mut SnapshotWriterState::Original(ref snapshot) => {
-                    // Starting chunk-wise lock.
-                    *contents = SnapshotWriterState::ChunkWise {
-                        snapshot: snapshot.clone(),
-                        locked: BitVec::from_elem(self.inner.num_chunks, false),
-                    };
-                    continue;
-                },
-                &mut SnapshotWriterState::Replace(_) => {
-                    panic!("tried to use chunk-wise modification after replacing snapshot");
-                },
-                &mut SnapshotWriterState::ChunkWise { ref mut snapshot, ref mut locked } =>
-                    (snapshot, locked),
-            };
-
-            let (chunk_set_index, chunk_index) = {
-                let mut chunk_index = index;
-                let mut chunk_set_index = 0;
-
-                for chunk_set in snapshot.chunk_sets.iter() {
-                    let num_chunks = chunk_set.chunks().len();
-                    if num_chunks <= chunk_index {
-                        chunk_set_index += 1;
-                        chunk_index -= num_chunks;
-                    } else {
-                        break;
-                    }
-                }
-
-                (chunk_set_index, chunk_index)
-            };
-
-            let index = snapshot.chunk_sets.iter()
-                .map(|cs| cs.chunks().len())
-                .take(chunk_set_index)
-                .sum::<usize>() + chunk_index;
-
-            if locked[index] {
-                let _ = self.inner.cond.wait(contents).unwrap();
-            } else {
-                locked.set(index, true);
-                let snapshot_mut = Arc::make_mut(snapshot);
-                let chunk_set_mut = &mut snapshot_mut.chunk_sets[chunk_set_index];
-
-                // This is safe since we only allow write access and only to
-                // one person at a time.
-                let chunk_set_mut: &mut ChunkSet = unsafe { std::mem::transmute(chunk_set_mut) };
-                break (chunk_set_mut, chunk_index);
-            }
-        };
-
-        let chunk = Arc::make_mut(chunk_set.chunk_mut(chunk_index).unwrap());
-        SnapshotWriterGuard {
-            writer: self,
-            chunk,
-            index,
-        }
-    }
-
-    /// Free a chunk previously locked by `borrow_chunk_mut`.
-    fn free_chunk(&self, index: usize) {
-        let mut contents = self.inner.contents.lock().unwrap();
-
-        match &mut *contents {
-            &mut SnapshotWriterState::ChunkWise { ref mut locked, .. } =>
-                locked.set(index, false),
-            _ => unreachable!(),
-        }
-
-        self.inner.cond.notify_all();
-    }
-}
-
-// A guard which ensures that written chunks are released.
-pub struct SnapshotWriterGuard<'a> {
-    writer: &'a SnapshotWriter,
-    chunk: &'a mut Chunk,
-    index: usize,
-}
-
-impl<'a> Drop for SnapshotWriterGuard<'a> {
-    fn drop(&mut self) {
-        self.writer.free_chunk(self.index);
-    }
-}
-
-impl<'a> Deref for SnapshotWriterGuard<'a> {
-    type Target = Chunk;
-
-    fn deref(&self) -> &Self::Target {
-        self.chunk
-    }
-}
-
-impl<'a> DerefMut for SnapshotWriterGuard<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.chunk
-    }
-}
-
-struct WorldGlobal {
-    archetypes: ArcSwap<VecSet<Arc<Archetype>>>,
-    zones: ArcSwap<Vec<Arc<Zone>>>,
-
-    next_entity_id: AtomicUsize,
-    next_zone_id: AtomicUsize,
-    max_chunk_size: usize,
-}
-
 /// A World wraps up a set of `ChunkSet`s.
 /// 
 /// The `World` is the most common way of managing entities. You can create an
@@ -285,33 +45,19 @@ struct WorldGlobal {
 /// `SystemSet`s which provide powerful ways of working with the contained
 /// entities.
 pub struct World {    
-    global: Arc<WorldGlobal>,
+    universe: Arc<Universe>,
     current_snapshot: ArcSwap<Snapshot>,
     empty_snapshot: Arc<Snapshot>,
 }
 
 impl World {
-    /// Create a new world with the default settings.
-    pub fn new() -> World {
-        World::with_max_chunk_size(4096)
-    }
-
-    /// Create a new world with a specified maximum number of entities per chunk.
-    pub fn with_max_chunk_size(max_chunk_size: usize) -> World {
-        let global = Arc::new(WorldGlobal{
-            archetypes: ArcSwap::from_pointee(VecSet::new()),
-            zones: ArcSwap::from_pointee(Vec::new()),
-
-            next_zone_id: AtomicUsize::new(1),
-            next_entity_id: AtomicUsize::new(1),
-            max_chunk_size,
-        });
-
-        let empty_snapshot = Arc::new(Snapshot::empty_for_global(Arc::downgrade(&global)));
+    /// Create a new world.
+    pub fn new(universe: Arc<Universe>) -> World {
+        let empty_snapshot = Arc::new(Snapshot::empty(universe.clone()));
         let current_snapshot = ArcSwap::new(empty_snapshot.clone());
 
         World {
-            global,
+            universe,
             empty_snapshot,
             current_snapshot,
         }
@@ -333,8 +79,8 @@ impl World {
 
     /// Set the current state of the world.
     pub fn set_snapshot(&self, snapshot: Arc<Snapshot>) {
-        assert!(snapshot.global().ptr_eq(&Arc::downgrade(&self.global)),
-            "snapshot is not of this world");
+        assert!(Arc::ptr_eq(snapshot.universe(), &self.universe),
+                "snapshot is not of this world");
         self.current_snapshot.store(snapshot);
     }
 
@@ -358,7 +104,7 @@ impl World {
         }
         component_types.sort();
 
-        let archetypes = self.global.archetypes.load();
+        let archetypes = self.universe.archetypes.load();
         archetypes.binary_search_by_key(&&component_types[..], |archetype| &*archetype.component_types())
             .ok()
             .map(|idx| archetypes[idx].clone())
@@ -376,7 +122,7 @@ impl World {
         }
 
         // Slow path which ensures no duplicate archetypes.
-        let archetypes = &self.global.archetypes;
+        let archetypes = &self.universe.archetypes;
         let new_archetype = Arc::new(Archetype::new(component_types));
 
         loop {
@@ -403,7 +149,7 @@ impl World {
         let mut new_zone = None;
 
         loop {
-            let zones = self.global.zones.load();
+            let zones = self.universe.zones.load();
 
             return match zones.binary_search_by_key(&(&*archetype as &Archetype as *const Archetype), |z| &*z.archetype() as &Archetype as *const Archetype) {
                 Ok(index) => {
@@ -411,8 +157,8 @@ impl World {
                 },
                 Err(index) => {
                     if new_zone.is_none() {
-                        let zone_id = self.global.next_zone_id.fetch_add(1, atomic::Ordering::Relaxed);
-                        new_zone = Some(Arc::new(Zone::new(archetype.clone(), self.global.max_chunk_size, zone_id)));
+                        let zone_id = self.universe.next_zone_id.fetch_add(1, atomic::Ordering::Relaxed);
+                        new_zone = Some(Arc::new(Zone::new(archetype.clone(), self.universe.max_chunk_size, zone_id)));
                     }
 
                     let mut new_zones = Vec::with_capacity(zones.len() + 1);
@@ -420,7 +166,7 @@ impl World {
                     new_zones.push(new_zone.clone().unwrap());
                     new_zones.extend(zones[index..].iter().cloned());
 
-                    let next_value = self.global.zones.compare_and_swap(&zones, Arc::new(new_zones));
+                    let next_value = self.universe.zones.compare_and_swap(&zones, Arc::new(new_zones));
                     if !std::ptr::eq(&*zones as &Vec<_>, &*next_value as &Vec<_>) {
                         continue;
                     }
@@ -433,7 +179,7 @@ impl World {
 
     /// Generate a new entity ID which is unique for this world.
     fn generate_entity_id(&self) -> EntityID {
-        EntityID::new(self.global.next_entity_id.fetch_add(1, atomic::Ordering::Relaxed))
+        EntityID::new(self.universe.next_entity_id.fetch_add(1, atomic::Ordering::Relaxed))
     }
 }
 
@@ -442,7 +188,7 @@ impl Debug for World {
         write!(f, "World {{\n")?;
         write!(f, "  Zones:\n")?;
 
-        for zone in self.global.zones.load().iter() {
+        for zone in self.universe.zones.load().iter() {
             let archetype = &zone.archetype();
 
             write!(f, "    #{} - ", zone.key())?;
@@ -456,125 +202,6 @@ impl Debug for World {
         write!(f, "}}\n")
     }
 }
-
-/// A snapshot of the state of the world.
-#[derive(Clone)]
-pub struct Snapshot {
-    global: Weak<WorldGlobal>,
-    chunk_sets: Vec<ChunkSet>,
-}
-
-impl Snapshot {
-    /// Create a new snapshot of an empty world.
-    pub fn empty(world: &Arc<World>) -> Snapshot {
-        Snapshot::empty_for_global(Arc::downgrade(&world.global))
-    }
-
-    /// Create a new empty snapshot given the `WorldGlobal`.
-    fn empty_for_global(global: Weak<WorldGlobal>) -> Snapshot {
-        Snapshot {
-            global,
-            chunk_sets: Vec::new(),
-        }
-    }
-
-    /// Get a weak reference to the owning global of this snapshot.
-    fn global(&self) -> &Weak<WorldGlobal> {
-        &self.global
-    }
-
-    /// Create a parallel iterator over the chunks in the snapshot.
-    #[cfg(feature = "rayon")]
-    pub fn par_iter_chunks(&self) -> impl ParallelIterator<Item=&Arc<Chunk>> {
-        self.chunk_sets.par_iter().flat_map(|cs| cs.chunks())
-    }
-
-    /// Create an iterator over all the chunks in the snapshot.
-    pub fn iter_chunks(&self) -> impl Iterator<Item=&Arc<Chunk>> {
-        self.chunk_sets.iter().flat_map(|cs| cs.chunks())
-    }
-
-    /// Get an `EntityReader` for the entity with the given ID.
-    /// 
-    /// Returns None if the entity doesn't exist in this snapshot.
-    pub fn entity_reader(self: &Arc<Self>, id: EntityID) -> Option<EntityReader> {
-        self.chunk_sets.iter().enumerate()
-            .filter_map(|(chunk_set_index, cs)| {
-                if let Some((chunk_index, entity_index)) = cs.binary_search(id).ok() {
-                    Some(EntityReader{
-                        snapshot: self.clone(),
-                        chunk_set_index,
-                        chunk_index,
-                        entity_index,
-                    })
-                } else {
-                    None
-                }
-            })
-            .next()
-    }
-}
-
-impl Debug for Snapshot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Snapshot {{\n")?;
-
-        write!(f, "  Chunks:\n")?;
-        for chunk_set in self.chunk_sets.iter() {
-            for chunk in chunk_set.chunks().iter() {
-                write!(f, "    {:?} - zone {} - {} entities\n", chunk.deref() as *const _, chunk.zone().key(), chunk.len())?;
-            }
-        }
-
-        write!(f, "  Entities:\n")?;        
-        for chunk_set in self.chunk_sets.iter() {
-            for chunk in chunk_set.chunks().iter() {
-                let ids = chunk.get_components::<EntityID>().unwrap();
-
-                for entity_id in ids {
-                    write!(f, "    Entity {:?} - Chunk {:?}\n", entity_id, chunk.deref() as *const _)?;
-                }
-            }
-        }
-
-        write!(f, "}}\n")
-    }
-}
-
-/// A reader for retreiving single entities from a snapshot.
-pub struct EntityReader {
-    snapshot: Arc<Snapshot>,
-    chunk_set_index: usize,
-    chunk_index: usize,
-    entity_index: usize,
-}
-
-impl EntityReader {
-    /// Get the ID of the entity this reader refers to.
-    pub fn entity_id(&self) -> EntityID {
-        *self.get_component::<EntityID>().unwrap()
-    }
-
-    /// Return the archetype this Entity conforms to.
-    pub fn archetype(&self) -> &Arc<Archetype> {
-        self.snapshot.chunk_sets[self.chunk_set_index].zone().archetype()
-    }
-
-    /// Create an iterator for the components on this entity.
-    pub fn component_types(&self) -> EntityComponentIterator {
-        EntityComponentIterator::for_archetype(self.archetype().clone())
-    }
-
-    /// Get a reference to a component on the given entity.
-    pub fn get_component<T: Component>(&self) -> Option<&T> {
-        let chunk_set = &self.snapshot.chunk_sets[self.chunk_set_index];
-        let chunk = &chunk_set.chunks()[self.chunk_index];
-        
-        chunk.get_components::<T>()
-            .and_then(|slice| slice.get(self.entity_index))
-    }
-}
-
 /// A `ComponentSource` which is used by `CommandBuffer`s.
 struct CommandBufferComponentSource<'a> {
     entity_id: EntityID,
@@ -672,7 +299,7 @@ impl CommandBuffer {
     /// buffer to a given snapshot.
     pub fn mutate_snapshot(&self, mut snapshot: Arc<Snapshot>) -> Arc<Snapshot> {
         let world = &self.world;
-        let archetypes = world.global.archetypes.load();
+        let archetypes = world.universe.archetypes.load();
 
         let move_entities = &self.move_entities;
         let update_entities = &self.update_entities;

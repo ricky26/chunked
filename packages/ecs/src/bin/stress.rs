@@ -3,6 +3,7 @@ use futures::executor::block_on;
 use ecs::{
     component,
     ComponentType,
+    Universe,
     World,
     CommandBuffer,
 };
@@ -13,7 +14,8 @@ pub struct MyComponent(i32);
 component!(MyComponent);
 
 fn main() {
-    let world = Arc::new(World::new());
+    let universe = Universe::new();
+    let world = Arc::new(World::new(universe));
     let arch = world.ensure_archetype(vec![
         ComponentType::for_type::<MyComponent>(),
     ]);

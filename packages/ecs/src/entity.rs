@@ -101,9 +101,9 @@ impl ComponentType {
     pub fn for_type<T: Component>() -> ComponentType {
         fn default<T: Component>(ptr: &mut [u8]) {
             assert!(ptr.len() == std::mem::size_of::<T>());
-            let ptr = unsafe { std::mem::transmute(ptr.as_ptr()) };
+            let ptr: &mut T = unsafe { std::mem::transmute(ptr.as_ptr()) };
             let d = T::default();
-            std::mem::replace(ptr, d);
+            *ptr = d;
         }
 
         ComponentType{
@@ -182,7 +182,7 @@ impl Archetype {
     /// `component_types` should be sorted.
     pub fn new(component_types: Vec<ComponentType>) -> Archetype {
         Archetype{
-            component_types: component_types,
+            component_types,
         }
     }
 

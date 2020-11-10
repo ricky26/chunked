@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use ecs::{
     component,
     ComponentType,
+    Universe,
     World,
     CommandBuffer,
     System,
@@ -121,7 +122,8 @@ impl System for ApplyVelocity {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let world = Arc::new(World::new());
+    let universe = Universe::new();
+    let world = Arc::new(World::new(universe));
     let arch = world.ensure_archetype(vec![
         ComponentType::for_type::<Position>(),
         ComponentType::for_type::<Mass>(),

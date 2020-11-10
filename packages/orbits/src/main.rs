@@ -11,6 +11,7 @@ use ecs::{
     component,
     ComponentType,
     EntityID,
+    Universe,
     World,
     CommandBuffer,
     System,
@@ -180,7 +181,8 @@ fn render_thread(world: Arc<World>) {
 
 #[tokio::main]
 async fn main() {
-    let world = Arc::new(World::new());
+    let universe = Universe::new();
+    let world = Arc::new(World::new(universe));
     let arch = world.ensure_archetype(vec![
         ComponentType::for_type::<Position>(),
         ComponentType::for_type::<Mass>(),

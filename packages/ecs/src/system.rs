@@ -10,8 +10,9 @@ use std::cmp::{Ord};
 use futures::future;
 use async_trait::async_trait;
 
-use crate::entity::{Component, ComponentType,};
-use crate::world::{SnapshotWriter, World};
+use crate::entity::{Component, ComponentType};
+use crate::snapshot::SnapshotWriter;
+use crate::world::World;
 use crate::reusable::{Reusable, ReusableAlloc};
 
 /// An ECS system.

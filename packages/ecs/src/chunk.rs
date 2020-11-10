@@ -6,7 +6,7 @@ use std::alloc::{self, Layout};
 use std::ptr::{self, NonNull};
 use std::cmp::{Ord, Ordering};
 use bit_vec::BitVec;
-use crossbeam_queue::{ArrayQueue, PushError};
+use crossbeam_queue::SegQueue;
 
 use crate::entity::{
     Component,
@@ -85,7 +85,7 @@ pub struct Zone {
     capacity: usize,
     key: usize,
     chunk_layout: Layout,
-    free_list: ArrayQueue<NonNull<u8>>,
+    free_list: SegQueue<NonNull<u8>>,
 }
 
 unsafe impl Send for Zone {}
@@ -101,7 +101,7 @@ impl Zone {
             capacity,
             key,
             chunk_layout,
-            free_list: ArrayQueue::new(256),
+            free_list: SegQueue::new(),
         }
     }
 
@@ -160,12 +160,7 @@ impl Zone {
     /// Free a previously allocated page.
     pub unsafe fn free_page(&self, p: NonNull<u8>) {
         if self.capacity > 0 {
-            match self.free_list.push(p) {
-                Ok(()) => {},
-                Err(PushError(p)) => {
-                    alloc::dealloc(p.as_ptr(), self.chunk_layout);
-                },
-            }
+            self.free_list.push(p)
         }
     }
 }

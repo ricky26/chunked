@@ -10,16 +10,20 @@ pub use entity::{
     EntityComponentIterator,
     EntityID,
 };
+pub use universe::Universe;
 pub use chunk::{
     Zone,
     Chunk,
     ChunkSet,
 };
+pub use snapshot::{
+    Snapshot,
+    SnapshotWriter,
+    SnapshotWriterGuard,
+};
 pub use world::{
     World,
     CommandBuffer,
-    Snapshot,
-    SnapshotWriter,
 };
 pub use system::{  
     System,
@@ -30,7 +34,10 @@ pub use system::{
 mod sorted_vec;
 mod reusable;
 
-pub mod entity;
+pub mod universe;
 pub mod chunk;
+pub mod snapshot;
+
+pub mod entity;
 pub mod world;
 pub mod system;
