@@ -1,195 +1,62 @@
 //! Logic for dealing with chunks of entities.
 
-use std::sync::Arc;
-use std::fmt::Debug;
-use std::alloc::{self, Layout};
-use std::ptr::{self, NonNull};
+use std::alloc::Layout;
 use std::cmp::{Ord, Ordering};
-use bit_vec::BitVec;
-use crossbeam_queue::SegQueue;
+use std::fmt::Debug;
+use std::ops::{Bound, RangeBounds};
+use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
-use crate::entity::{
+use bit_vec::BitVec;
+
+use crate::{Archetype, EntityID};
+use crate::archetype::ComponentVecSet;
+use crate::component::{
     Component,
     ComponentTypeID,
-    ComponentSource,
-    Archetype,
-    EntityID,
 };
+use crate::component_data::{ComponentData, ComponentValueRef, ComponentDataSlice};
+use std::convert::TryFrom;
 
-/// An iterator for the offsets of components stored in a chunk.
-pub struct ComponentOffsetIterator {
-    archetype: Arc<Archetype>,
-    capacity: usize,
-    type_index: usize,
-    offset: usize,
-    align: usize,
+
+/// A single action on an entity in a `Chunk`.
+#[derive(Clone)]
+pub(crate) enum ChunkAction {
+    Upsert(usize, usize),
+    Remove,
 }
 
-impl ComponentOffsetIterator {
-    /// Create a new `ComponentOffsetIterator` for the given `Archetype` and
-    /// chunk capacity.
-    pub fn new(archetype: Arc<Archetype>, capacity: usize) -> ComponentOffsetIterator {
-        ComponentOffsetIterator {
-            archetype,
-            capacity,
-            type_index: 0,
-            offset: 0,
-            align: 0,
-        }
-    }
-
-    /// Consume this iterator and return the layout of the entire component set.
-    pub fn into_layout(mut self) -> Layout {
-        while let Some(_) = self.next() {}
-        Layout::from_size_align(self.offset.max(1), self.align).unwrap()
-    }
-}
-
-impl Iterator for ComponentOffsetIterator {
-    type Item = usize;
- 
-    fn next(&mut self) -> Option<usize> {
-        let component_types = self.archetype.component_types();
-        if self.type_index >= component_types.len() {
-            None
-        } else {
-            let ty = component_types[self.type_index];
-            self.type_index += 1;
-            let offset = self.offset;
-
-            let layout = ty.layout();
-            let align = layout.align();
-            let size = layout.size();
-
-            let misalignment = self.offset % align;
-
-            if misalignment != 0 {
-                self.offset += align - misalignment;
-            }
-
-            if align > self.align {
-                self.align = align;
-            }
-
-            self.offset += self.capacity * size;
-            Some(offset)
-        }
-    }
-}
-
-/// A zone from which `Chunk`s can be allocated.
-/// 
-/// Largely `Zone` exists to optimise allocations performed for `Chunk`s.
-pub struct Zone {
-    archetype: Arc<Archetype>,
-    capacity: usize,
-    key: usize,
-    chunk_layout: Layout,
-    free_list: SegQueue<NonNull<u8>>,
-}
-
-unsafe impl Send for Zone {}
-unsafe impl Sync for Zone {}
-
-impl Zone {
-    /// Construct a new Zone given the archetype and Zone ID.
-    pub fn new(archetype: Arc<Archetype>, capacity: usize, key: usize) -> Zone {
-        let chunk_layout = ComponentOffsetIterator::new(archetype.clone(), capacity).into_layout();
-
-        Zone {
-            archetype,
-            capacity,
-            key,
-            chunk_layout,
-            free_list: SegQueue::new(),
-        }
-    }
-
-    /// Get the sorting key for this `Zone`.
-    pub fn key(&self) -> usize {
-        self.key
-    }
-
-    /// Return the archetype this `Zone` covers.
-    pub fn archetype(&self) -> &Arc<Archetype> {
-        &self.archetype
-    }
-
-    /// Get the maximum capacity of chunks in this `Zone`.
-    pub fn chunk_capacity(&self) -> usize {
-        self.capacity
-    }
-
-    /// Get the required memory layout for a chunk.
-    pub fn chunk_layout(&self) -> Layout {
-        self.chunk_layout
-    }
-
-    /// Return an iterator over the component offsets of a Chunk.
-    pub fn component_offset_iter(&self) -> ComponentOffsetIterator {
-        ComponentOffsetIterator::new(self.archetype.clone(), self.capacity)
-    }
-
-    /// Create a new chunk with a given capacity.
-    pub fn new_chunk(self: Arc<Self>) -> Chunk {
-        let zone = self.clone();
-        let ptr = self.allocate_page();
-
-        Chunk {
-            zone,
-            ptr,
-            len: 0,
-        }
-    }
-
-    /// Allocate a new page for this Zone.
-    pub fn allocate_page(&self) -> NonNull<u8> {
-        if self.capacity > 0 {
-            match self.free_list.pop() {
-                Ok(ptr) => ptr,
-                Err(_) => {
-                    let raw_ptr = unsafe { alloc::alloc(self.chunk_layout) };
-                    NonNull::new(raw_ptr).unwrap()
-                },
-            }
-        } else {
-            NonNull::dangling()
-        }
-    }
-
-    /// Free a previously allocated page.
-    pub unsafe fn free_page(&self, p: NonNull<u8>) {
-        if self.capacity > 0 {
-            self.free_list.push(p)
-        }
-    }
-}
-
-impl Drop for Zone {
-    fn drop(&mut self) {
-        while let Ok(p) = self.free_list.pop() {
-            unsafe { alloc::dealloc(p.as_ptr(), self.chunk_layout) };
-        }
-    }
-}
+/// An edit list for one or more `Chunk`s.
+#[derive(Clone)]
+pub(crate) struct ChunkEdit(pub EntityID, pub ChunkAction);
 
 /// A single `Chunk` of entities of the same `Archetype`.
 /// 
 /// The components are stored as a struct of arrays in one contiguous block of
 /// memory.
 pub struct Chunk {
-    zone: Arc<Zone>,
+    archetype: Arc<Archetype>,
     ptr: NonNull<u8>,
     len: usize,
 }
 
 unsafe impl Send for Chunk {}
+
 unsafe impl Sync for Chunk {}
 
 impl Chunk {
-    /// Return the `Zone` this chunk belongs to.
-    pub fn zone(&self) -> &Arc<Zone> {
-        &self.zone
+    /// Create a new chunk from the raw parts.
+    pub unsafe fn from_raw(archetype: Arc<Archetype>, ptr: NonNull<u8>, len: usize) -> Chunk {
+        Chunk {
+            archetype,
+            ptr,
+            len,
+        }
+    }
+
+    /// Return the `Archetype` this chunk belongs to.
+    pub fn archetype(&self) -> &Arc<Archetype> {
+        &self.archetype
     }
 
     /// Get the total number of entities currently stored in this chunk.
@@ -199,30 +66,17 @@ impl Chunk {
 
     /// Get the total capacity of this chunk (usually this is fixed).
     pub fn capacity(&self) -> usize {
-        self.zone.capacity
+        self.archetype.chunk_capacity()
     }
 
     /// Get the memory layout of this chunk.
     pub fn layout(&self) -> Layout {
-        self.zone.chunk_layout()
-    }
-
-    /// Get the offset into the chunk storage for a given component list.
-    pub fn get_component_offset(&self, component_type: ComponentTypeID) -> Option<usize> {
-        let iter = self.zone.component_offset_iter();
-
-        for (ty, offset) in self.zone.archetype.component_types().iter().zip(iter) {
-            if ty.type_id() == component_type {
-                return Some(offset)
-            }
-        }
-
-        None
+        self.archetype.chunk_layout()
     }
 
     /// Get a slice of components from this chunk.
-    pub fn get_components<T: Component>(&self) -> Option<&[T]> {
-        self.get_component_offset(T::type_id()).map(|offset| {
+    pub fn components<T: Component>(&self) -> Option<&[T]> {
+        self.archetype.component_offset(T::type_id()).map(|offset| {
             unsafe {
                 let ptr = self.ptr.as_ptr().offset(offset as isize) as *const T;
                 &*std::ptr::slice_from_raw_parts(ptr, self.len)
@@ -231,8 +85,8 @@ impl Chunk {
     }
 
     /// Get a mutable list of components from this chunk.
-    pub fn get_components_mut<T: Component>(&mut self) -> Option<&mut [T]> {
-        self.get_component_offset(T::type_id()).map(|offset| {
+    pub fn components_mut<T: Component>(&mut self) -> Option<&mut [T]> {
+        self.archetype.component_offset(T::type_id()).map(|offset| {
             unsafe {
                 let ptr = self.ptr.as_ptr().offset(offset as isize) as *mut T;
                 &mut *std::ptr::slice_from_raw_parts_mut(ptr, self.len)
@@ -242,44 +96,87 @@ impl Chunk {
 
     /// Create a new `ChunkSplitter` for accessing multiple component lists at the
     /// same time.
-    pub fn split(&mut self) -> ChunkSplitter {
+    pub fn split_by_component_mut(&mut self) -> ChunkSplitter {
         ChunkSplitter::new(self)
     }
 
-    /// Replace an entity in this chunk with the contents of a `ComponentSource`.
-    pub fn replace_at(&mut self, index: usize, component_source: &impl ComponentSource) {
+    /// Update the components of an entity in this chunk at the given index.
+    pub fn update_at<'a>(&mut self, index: usize, component_data: &impl ComponentData<'a>) {
+        self.apply_at(index, component_data, false)
+    }
+
+    /// Replace the entity at the given index.
+    pub fn replace_at<'a>(&mut self, index: usize, component_data: &impl ComponentData<'a>) {
+        self.apply_at(index, component_data, true)
+    }
+
+    /// Apply component data to an entity, optionally clearing it.
+    fn apply_at<'a>(&mut self, index: usize, component_data: &impl ComponentData<'a>, clear: bool) {
         assert!(self.len > index, "Items can only be replaced at positions up to len()");
-        let components = self.zone.archetype.component_types().iter()
-            .zip(self.zone.component_offset_iter());
+        let components = self.archetype.component_types().as_slice().iter()
+            .zip(self.archetype.component_offsets().iter());
+        let mut component_data = component_data.iter().peekable();
 
         for (ty, offset) in components {
+            let data = component_data.peek();
+            let cmp = data.map_or(Ordering::Greater, |v| v.type_id().cmp(ty));
+
+            let src = match cmp {
+                Ordering::Less => panic!("tried to update non-existing component"),
+                Ordering::Equal => data,
+                Ordering::Greater => {
+                    if !clear {
+                        continue;
+                    }
+
+                    None
+                }
+            };
+
             let layout = ty.layout();
             let size = layout.size();
 
             let item_offset = offset + (size * index);
 
-            unsafe {
-                let slice = {
+            let dest_slice = {
+                unsafe {
                     let ptr = self.ptr.as_ptr().offset(item_offset as isize);
                     &mut *std::ptr::slice_from_raw_parts_mut(ptr, size)
-                };
+                }
+            };
 
-                component_source.set_component(ty, slice);
+            if let Some(src) = src {
+                let src_slice = src.as_slice();
+                assert_eq!(src_slice.len(), dest_slice.len());
+                dest_slice.copy_from_slice(src_slice);
+                component_data.next();
+            } else {
+                ty.registration().set_default(dest_slice);
             }
         }
     }
 
     /// Insert an entity into this chunk, using the factory function provided to
     /// fill components.
-    pub fn insert(&mut self, index: usize, component_source: &impl ComponentSource) {
+    pub fn insert<'a>(&mut self, index: usize, component_data: &impl ComponentData<'a>) {
         assert!(self.len >= index, "Items can only be inserted at positions up to len()");
 
         let num_to_move = self.len - index;
         self.len += 1;
-        let components = self.zone.archetype.component_types().iter()
-            .zip(self.zone.component_offset_iter());
+        let components = self.archetype.component_types().as_slice().iter()
+            .zip(self.archetype.component_offsets().iter());
+        let mut component_data = component_data.iter().peekable();
 
         for (ty, offset) in components {
+            let data = component_data.peek();
+            let cmp = data.map_or(Ordering::Greater, |v| v.type_id().cmp(ty));
+
+            let src = match cmp {
+                Ordering::Less => panic!("tried to insert component not in chunk"),
+                Ordering::Equal => Some(data.unwrap()),
+                Ordering::Greater => None,
+            };
+
             let layout = ty.layout();
             let size = layout.size();
             let begin_offset = offset + (size * index);
@@ -293,31 +190,55 @@ impl Chunk {
                     ptr::copy(from, to, count);
                 }
 
-                let slice = {
+                let dest_slice = {
                     let ptr = self.ptr.as_ptr().offset(begin_offset as isize);
                     &mut *std::ptr::slice_from_raw_parts_mut(ptr, size)
                 };
 
-                component_source.set_component(ty, slice);
+                if let Some(src_slice) = src.map(|v| v.as_slice()) {
+                    dest_slice.copy_from_slice(src_slice);
+                    component_data.next();
+                } else {
+                    ty.registration().set_default(dest_slice);
+                }
             }
         }
     }
 
     /// Insert a number of entities from another chunk at the given index.
-    pub fn insert_from(&mut self, insert_at: usize, other: &Chunk, source_index: usize, n: usize) {
-        assert!(std::ptr::eq(&*self.zone, &*other.zone), "chunks can only share elements in the same zone");
-        assert!(self.len + n <= self.capacity());
+    pub fn copy_from(&mut self, insert_at: usize, other: &Chunk, range: impl RangeBounds<usize>) {
+        assert!(std::ptr::eq(&*self.archetype, &*other.archetype), "chunks can only share elements in the same archetype");
+        let src_start = match range.start_bound() {
+            Bound::Unbounded => 0,
+            Bound::Included(x) => *x,
+            Bound::Excluded(x) => 1 + *x,
+        };
+        let src_end = match range.end_bound() {
+            Bound::Unbounded => self.len,
+            Bound::Included(x) => 1 + *x,
+            Bound::Excluded(x) => *x,
+        };
+        assert!(src_start <= src_end);
+        assert!(src_start <= other.len);
+        assert!(src_end <= other.len);
 
-        let num_to_move = self.len - insert_at;
+        let n = src_end - src_start;
+        let dest_start = insert_at;
+        let dest_end = insert_at + n;
+        assert!(dest_start <= dest_end);
+        assert!(dest_start <= self.len);
+        assert!(dest_end <= self.len);
+
+        let num_to_move = self.len - dest_start;
         self.len += n;
-        let components = self.zone.archetype.component_types().iter()
-            .zip(self.zone.component_offset_iter());
+        let components = self.archetype.component_types().as_slice().iter()
+            .zip(self.archetype.component_offsets().iter());
 
         for (ty, offset) in components {
             let layout = ty.layout();
             let size = layout.size();
-            let insert_offset = offset + (size * insert_at);
-            let source_offset = offset + (size * source_index);
+            let insert_offset = offset + (size * dest_start);
+            let source_offset = offset + (size * src_start);
 
             unsafe {
                 if num_to_move > 0 {
@@ -335,26 +256,125 @@ impl Chunk {
     }
 
     /// Remove an entity from this chunk by its index into the chunk.
-    pub fn remove(&mut self, index: usize, n: usize) {
-        assert!(self.len > index, "Removal index must be < len()");
-        assert!(self.len >= n);
+    pub fn remove(&mut self, range: impl RangeBounds<usize>) {
+        let start = match range.start_bound() {
+            Bound::Unbounded => 0,
+            Bound::Included(x) => *x,
+            Bound::Excluded(x) => 1 + *x,
+        };
+        let end = match range.end_bound() {
+            Bound::Unbounded => self.len,
+            Bound::Included(x) => 1 + *x,
+            Bound::Excluded(x) => *x,
+        };
+        assert!(start <= end);
+        assert!(start <= self.len);
+        assert!(end <= self.len);
 
-        let num_to_move = self.len - index - n;
-        self.len -= n;
-        let components = self.zone.archetype.component_types().iter()
-            .zip(self.zone.component_offset_iter());
+        let num_to_move = self.len - end;
+        self.len = start + num_to_move;
+        let ptr = self.ptr.as_ptr();
+        let components = self.archetype.component_types().as_slice().iter()
+            .zip(self.archetype.component_offsets().iter());
 
         if num_to_move > 0 {
             for (ty, offset) in components {
                 let layout = ty.layout();
                 let size = layout.size();
-                let begin_offset = offset + (size * index);
+                let dest_offset = (offset + (size * start)) as isize;
+                let src_offset = (offset + (size * end)) as isize;
                 let count = size * num_to_move;
 
                 unsafe {
-                    let to = self.ptr.as_ptr().offset(begin_offset as isize);
-                    let from = to.offset((n * size) as isize);
+                    let to = ptr.offset(dest_offset);
+                    let from = to.offset(src_offset);
                     ptr::copy(from, to, count);
+                }
+            }
+        }
+    }
+
+    /// Get an entity entry by index.
+    pub fn entity_by_index(self: &Arc<Chunk>, index: usize) -> Option<EntityEntry> {
+        if self.len <= index {
+            return None;
+        }
+
+        Some(EntityEntry {
+            chunk: self.clone(),
+            index,
+        })
+    }
+
+    fn move_internal(&mut self, dest_idx: usize, src_idx: usize, n: usize) {
+        if n == 0 || dest_idx == src_idx {
+            return;
+        }
+
+        let components = self.archetype.component_types().as_slice().iter()
+            .zip(self.archetype.component_offsets().iter());
+
+        for (ty, offset) in components {
+            let layout = ty.layout();
+            let size = layout.size();
+            let dest_offset = offset + (size * dest_idx);
+            let src_offset = offset + (size * src_idx);
+
+            unsafe {
+                let write_ptr = self.ptr.as_ptr().offset(dest_offset as isize);
+                let read_ptr = self.ptr.as_ptr().offset(src_offset as isize);
+                std::ptr::copy(read_ptr, write_ptr, n * size);
+            }
+        }
+    }
+
+    /// Modify this chunk in-place with changes from an edit list.
+    ///
+    /// # Panics
+    /// If `edits` is not in reverse order.
+    pub(crate) fn modify<'a, I>(&mut self, edits: I, component_data: &[ComponentValueRef<'_>])
+        where I: Iterator<Item=&'a ChunkEdit> + Clone
+    {
+        let mut read_idx = self.len();
+        let mut write_idx = edits.clone().fold(self.len(), |acc, x| {
+            let ChunkEdit(_, action) = x;
+
+            match action {
+                ChunkAction::Upsert(_, _) => acc + 1,
+                ChunkAction::Remove => acc - 1,
+            }
+        });
+        assert!(write_idx <= self.capacity());
+        self.len = write_idx;
+
+        for ChunkEdit(id, action) in edits.cloned() {
+            let entity_ids = self.components::<EntityID>().unwrap();
+
+            match action {
+                ChunkAction::Upsert(data_start_idx, data_end_idx) => {
+                    let data_slice = &component_data[data_start_idx..data_end_idx];
+                    let data = ComponentDataSlice::try_from(data_slice).unwrap();
+
+                    match entity_ids[..read_idx].binary_search(&id) {
+                        Ok(idx) => {
+                            self.update_at(idx, &data);
+                        }
+                        Err(idx) => {
+                            let to_move = read_idx - idx;
+                            read_idx = idx;
+                            write_idx -= to_move + 1;
+                            self.move_internal(write_idx + 1, read_idx, to_move);
+                            self.replace_at(write_idx, &data);
+                            self.components_mut::<EntityID>().unwrap()[write_idx] = id;
+                        }
+                    }
+                }
+                ChunkAction::Remove => {
+                    let src_idx = entity_ids[..read_idx].binary_search(&id).unwrap();
+                    let to_move = read_idx - (src_idx + 1);
+                    self.move_internal(write_idx - to_move, read_idx - to_move, to_move);
+                    read_idx = src_idx;
+                    write_idx -= to_move;
                 }
             }
         }
@@ -363,8 +383,8 @@ impl Chunk {
 
 impl Clone for Chunk {
     fn clone(&self) -> Self {
-        let zone = self.zone.clone();
-        let ptr = self.zone.allocate_page();
+        let archetype = self.archetype.clone();
+        let ptr = self.archetype.allocate_page();
         let layout = self.layout();
 
         if self.len > 0 {
@@ -372,7 +392,7 @@ impl Clone for Chunk {
         }
 
         Chunk {
-            zone,
+            archetype,
             ptr,
             len: self.len,
         }
@@ -382,15 +402,15 @@ impl Clone for Chunk {
 impl Debug for Chunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f,
-            "Chunk {{ zone: {:?}, len: {} }}",
-            self.zone.as_ref() as *const _,
-            self.len)
+               "Chunk {{ archetype: {:?}, len: {} }}",
+               self.archetype.as_ref() as *const _,
+               self.len)
     }
 }
 
 impl Drop for Chunk {
     fn drop(&mut self) {
-        unsafe { self.zone.free_page(self.ptr) };
+        unsafe { self.archetype.free_page(self.ptr) };
     }
 }
 
@@ -410,22 +430,45 @@ pub struct ChunkSplitter<'a> {
 impl<'a> ChunkSplitter<'a> {
     /// Construct a new `ChunkSplitter` from a mutable `Chunk` reference.
     pub fn new(chunk: &mut Chunk) -> ChunkSplitter {
-        let num_components = chunk.zone().archetype().component_types().len();
+        let num_components = chunk.archetype().component_types().as_slice().len();
 
-        ChunkSplitter{
+        ChunkSplitter {
             chunk,
-            locked: BitVec::from_elem(num_components, false),
+            locked: BitVec::from_elem(num_components << 1, false),
+        }
+    }
+
+    fn type_index(&self, type_id: &ComponentTypeID) -> Option<usize> {
+        let types = self.chunk.archetype().component_types();
+        types.as_slice()
+            .binary_search(type_id)
+            .ok()
+    }
+
+    fn mark_type(&mut self, type_id: &ComponentTypeID, mutable: bool) -> bool {
+        let index = match self.type_index(type_id) {
+            Some(x) => x,
+            None => return false,
+        };
+        let offset = index << 1;
+        let const_taken = self.locked[offset];
+        let mut_taken = self.locked[offset + 1];
+
+        if mutable && !mut_taken && !const_taken {
+            self.locked.set(offset + 1, true);
+            true
+        } else if !mutable && !const_taken {
+            self.locked.set(offset, true);
+            true
+        } else {
+            false
         }
     }
 
     /// Get the slice of all components of the given type in the chunk.
-    pub fn get_components<T: Component>(&mut self) -> Option<&'a [T]> {
-        let types = self.chunk.zone().archetype().component_types();
-        let type_index = types.binary_search_by_key(&T::type_id(), |ct| ct.type_id()).ok();
-        
-        if type_index.and_then(|idx| self.locked.get(idx)) == Some(false) {
-            self.locked.set(type_index.unwrap(), true);
-            let types = unsafe { std::mem::transmute(self.chunk.get_components::<T>().unwrap()) };
+    pub fn components<T: Component>(&mut self) -> Option<&'a [T]> {
+        if self.mark_type(&T::type_id(), false) {
+            let types = unsafe { std::mem::transmute(self.chunk.components::<T>().unwrap()) };
             Some(types)
         } else {
             None
@@ -433,13 +476,9 @@ impl<'a> ChunkSplitter<'a> {
     }
 
     /// Get the mutable slice of all components of the given type in the chunk.
-    pub fn get_components_mut<T: Component>(&mut self) -> Option<&'a mut [T]> {
-        let types = self.chunk.zone().archetype().component_types();
-        let type_index = types.binary_search_by_key(&T::type_id(), |ct| ct.type_id()).ok();
-        
-        if type_index.and_then(|idx| self.locked.get(idx)) == Some(false) {
-            self.locked.set(type_index.unwrap(), true);
-            let types = unsafe { std::mem::transmute(self.chunk.get_components_mut::<T>().unwrap()) };
+    pub fn components_mut<T: Component>(&mut self) -> Option<&'a mut [T]> {
+        if self.mark_type(&T::type_id(), true) {
+            let types = unsafe { std::mem::transmute(self.chunk.components_mut::<T>().unwrap()) };
             Some(types)
         } else {
             None
@@ -447,254 +486,83 @@ impl<'a> ChunkSplitter<'a> {
     }
 }
 
-/// An ordered set of chunks.
-/// 
-/// `ChunkSet`s are used to manage a dynamic lists of chunks such that any
-/// number of entities of the same Archetype can be stored.
-#[derive(Clone)]
-pub struct ChunkSet {
-    zone: Arc<Zone>,
-    chunks: Vec<Arc<Chunk>>,
+/// A reader for retrieving single entities from a snapshot.
+pub struct EntityEntry {
+    chunk: Arc<Chunk>,
+    index: usize,
 }
 
-impl ChunkSet {
-    /// Create a new empty `ChunkSet` for the given `Zone`.
-    pub fn new(zone: Arc<Zone>) -> ChunkSet {
-        ChunkSet {
-            zone,
-            chunks: Vec::new(),
+impl EntityEntry {
+    /// Get the ID of the entity this reader refers to.
+    pub fn entity_id(&self) -> EntityID {
+        *self.component::<EntityID>().unwrap()
+    }
+
+    /// Return the archetype this Entity conforms to.
+    pub fn archetype(&self) -> &Arc<Archetype> {
+        self.chunk.archetype()
+    }
+
+    /// Get the component types attached to this entity.
+    pub fn component_types(&self) -> &ComponentVecSet {
+        self.archetype().component_types()
+    }
+
+    /// Get a reference to a component on the given entity.
+    pub fn component<T: Component>(&self) -> Option<&T> {
+        self.chunk.components::<T>()
+            .and_then(|slice| slice.get(self.index))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChunkEntityData {
+    chunk: Arc<Chunk>,
+    entity_index: usize,
+    component_index: usize,
+}
+
+impl ChunkEntityData {
+    /// Create a new `ChunkEntityData` for copying entities.
+    pub fn new(chunk: Arc<Chunk>, entity_index: usize) -> ChunkEntityData {
+        ChunkEntityData {
+            chunk,
+            entity_index,
+            component_index: 0,
         }
     }
+}
 
-    /// Get the `Zone` the `Chunk`s in this `ChunkSet` are allocated from.
-    pub fn zone(&self) -> &Arc<Zone> {
-        &self.zone
+impl ComponentData<'static> for ChunkEntityData {
+    type Iterator = ChunkEntityData;
+
+    fn iter(&self) -> Self::Iterator {
+        self.clone()
     }
+}
 
-    /// Get the slice of all chunks in this `ChunkSet`.
-    pub fn chunks(&self) -> &[Arc<Chunk>] {
-        &self.chunks
-    }
+impl Iterator for ChunkEntityData {
+    type Item = ComponentValueRef<'static>;
 
-    /// Get a mutable reference to a single chunk in the `ChunkSet`.
-    pub fn chunk_mut(&mut self, index: usize) -> Option<&mut Arc<Chunk>> {
-        self.chunks.get_mut(index)
-    }
-
-    /// Search for a given entity in the `ChunkSet`, an `Ok()` returns the index
-    /// of the entity in the `ChunkSet`, an `Err()` returns the index where it
-    /// would be inserted.
-    pub fn binary_search(&self, entity_id: EntityID) -> Result<(usize, usize), (usize, usize)> {
-        let mut lo = 0;
-        let mut hi = self.chunks.len();
-
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            let chunk = &self.chunks[mid];
-            let ids = chunk.get_components::<EntityID>().unwrap();
-
-            if mid > 0 {
-                if let Some(bound) = ids.get(0) {
-                    if entity_id.cmp(&bound) == Ordering::Less {
-                        hi = mid;
-                        continue;
-                    }
-                }
-            }
-
-            if let Some(chunk) = self.chunks.get(mid + 1) {
-                let ids = chunk.get_components::<EntityID>().unwrap();
-                if let Some(bound) = ids.get(0) {
-                    if entity_id.cmp(&bound) != Ordering::Less {
-                        lo = mid + 1;
-                        continue;
-                    }
-                }
-            }
-
-            // We're in the right chunk!
-            return match ids.binary_search(&entity_id) {
-                Ok(idx) => Ok((mid, idx)),
-                Err(idx) => Err((mid, idx)),
-            };
+    fn next(&mut self) -> Option<Self::Item> {
+        let archetype = &self.chunk.archetype;
+        let component_types = archetype.component_types();
+        let component_types = component_types.as_slice();
+        if self.component_index >= component_types.len() {
+            return None;
         }
 
-        Err((0, 0))
-    }
-    
-    /// Push a new entity to the back of this `ChunkSet`.
-    pub fn push(&mut self, components: &impl ComponentSource) -> (usize, usize) {
-        let (chunk_index, index) = if self.chunks.len() == 0 {
-            (0, 0)
-        } else {
-            let chunk_index = self.chunks.len() - 1;
-            let index = self.chunks[chunk_index].len();
-            (chunk_index, index)
+        let type_id = component_types[self.component_index];
+        let size = type_id.layout().size();
+        let offset = archetype.component_offset(type_id).unwrap()
+            + (size * self.entity_index);
+
+        let value = unsafe {
+            let ptr = self.chunk.as_ref().ptr.as_ptr().offset(offset as isize);
+            let slice = std::slice::from_raw_parts(ptr, size);
+            ComponentValueRef::from_raw(type_id, slice)
         };
-
-        self.insert_at(chunk_index, index, components)
-    }
-
-    /// Insert an entity at the given position, returning the next position after
-    /// the inserted entity.
-    pub fn insert_at(&mut self, chunk_index: usize, index: usize, components: &impl ComponentSource) -> (usize, usize) {
-        // Special case: inserting the first chunk.
-        if self.chunks.len() == 0 {
-            assert_eq!(chunk_index, 0);
-            assert_eq!(index, 0);
-
-            let mut chunk = self.zone.clone().new_chunk();
-            chunk.insert(0, components);
-            self.chunks.push(Arc::new(chunk));
-            return (0, 1);
-        }
-
-        let chunk = Arc::make_mut(&mut self.chunks[chunk_index]);
-        let cap = chunk.capacity();
-        let half_cap = cap / 2;
-
-        if chunk.len() < cap {
-            // Just insert the entity!
-            chunk.insert(index, components);
-            (chunk_index, index + 1)
-        } else {
-            // Not enough room, split the chunk!
-            let mut right_chunk = chunk.zone().clone().new_chunk();
-            right_chunk.insert_from(0, chunk, half_cap, half_cap);
-            chunk.remove(half_cap, half_cap);
-
-            let new_pos = if index > half_cap {
-                right_chunk.insert(index - half_cap, components);
-                (chunk_index + 1, index - half_cap + 1)
-            } else {
-                chunk.insert(index, components);
-                (chunk_index, index + 1)
-            };
-
-            self.chunks.insert(chunk_index + 1, Arc::new(right_chunk));
-            new_pos
-        }
-    }
-
-    /// Remove an entity from this `ChunkSet`, returning the position after
-    /// the entity in the new layout.
-    pub fn remove_at(&mut self, chunk_index: usize, index: usize) -> (usize, usize) {
-        let max_chunk_size = self.zone.chunk_capacity();
-        let chunk = &self.chunks[chunk_index];
-
-        // Special case: removing the final entity!
-        if chunk.len() == 1 && self.chunks.len() == 1 {
-            assert_eq!(chunk_index, 0);
-            assert_eq!(index, 0);
-            self.chunks.clear();
-            return (0, 0);
-        }
-
-        let needs_merge = (chunk.len() <= max_chunk_size / 2) && self.chunks.len() > 1;
-
-        if needs_merge {
-            let left_len = if chunk_index > 0 {
-                Some(self.chunks[chunk_index - 1].len())
-            } else {
-                None
-            };
-            let right_len = self.chunks.get(chunk_index + 1).map(|x| x.len());
-            let merge_left = right_len.is_none() || (left_len.unwrap() <= right_len.unwrap());
-            
-            if merge_left {
-                let (left_chunk, right_chunk) = {
-                    let pair = &mut self.chunks[chunk_index-1..chunk_index+1];
-                    let (left, rest) = pair.split_first_mut().unwrap();
-                    (Arc::make_mut(left), Arc::make_mut(&mut rest[0]))
-                };
-
-                let left_len = left_len.unwrap();
-                let right_len = right_chunk.len();
-                let total_len = right_len + left_len - 1;
-
-                if total_len <= max_chunk_size {
-                    // Genuine merge
-                    left_chunk.insert_from(left_chunk.len(), right_chunk, 0, index);
-                    let new_index = left_chunk.len();
-                    let after_split = right_chunk.len() - index - 1;
-                    left_chunk.insert_from(left_chunk.len(), right_chunk, index + 1, after_split);
-
-                    self.chunks.remove(chunk_index);
-                    (chunk_index - 1, new_index)
-                } else {
-                    // Rebalance
-                    let split_at = total_len / 2;
-                    right_chunk.remove(index, 1);
-
-                    if left_chunk.len() > right_chunk.len() {
-                        // Move from left chunk to right chunk.
-                        let n = left_chunk.len() - split_at;
-                        let source_idx = left_chunk.len() - n;
-                        right_chunk.insert_from(0, left_chunk, source_idx, n);
-                        left_chunk.remove(source_idx, n);
-
-                    } else {
-                        // Move from right chunk to left.
-                        let n = right_chunk.len() - split_at;
-                        left_chunk.insert_from(left_chunk.len(), right_chunk, 0, n);
-                        right_chunk.remove(0, n);
-                    }
-
-                    let from_right = right_len - index;
-                    if from_right <= split_at {
-                        (chunk_index, right_chunk.len() - from_right)
-                    } else {
-                        (chunk_index - 1, left_chunk.len() + right_chunk.len() - from_right)
-                    }
-                }
-            } else {
-                let (left_chunk, right_chunk) = {
-                    let pair = &mut self.chunks[chunk_index..chunk_index+2];
-                    let (left, rest) = pair.split_first_mut().unwrap();
-                    (Arc::make_mut(left), Arc::make_mut(&mut rest[0]))
-                };
-
-                let left_len = left_chunk.len();
-                let right_len = right_len.unwrap();
-                let total_len = right_len + left_len - 1;
-
-                left_chunk.remove(index, 1);
-
-                if total_len <= max_chunk_size {
-                    // Genuine merge
-                    left_chunk.insert_from(left_chunk.len(), right_chunk, 0, right_chunk.len());
-
-                    self.chunks.remove(chunk_index + 1);
-                    (chunk_index, index)
-                } else {
-                    // Rebalance
-                    let split_at = total_len / 2;
-
-                    if left_chunk.len() > right_chunk.len() {
-                        // Move from left chunk to right chunk.
-                        let n = left_chunk.len() - split_at;
-                        let source_idx = left_chunk.len() - n;
-                        right_chunk.insert_from(0, left_chunk, source_idx, n);
-                        left_chunk.remove(source_idx, n);
-
-                    } else {
-                        // Move from right chunk to left.
-                        let n = right_chunk.len() - split_at;
-                        left_chunk.insert_from(left_chunk.len(), right_chunk, 0, n);
-                        right_chunk.remove(0, n);
-                    }
-
-                    if index >= split_at {
-                        (chunk_index + 1, index - left_chunk.len())
-                    } else {
-                        (chunk_index, index)
-                    }
-                }
-            }
-        } else {
-            let mut_chunk = Arc::make_mut(&mut self.chunks[chunk_index]);
-            mut_chunk.remove(index, 1);
-            (chunk_index, index)
-        }
+        self.component_index += 1;
+        Some(value)
     }
 }

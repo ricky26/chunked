@@ -1,43 +1,37 @@
 //! An entity component system.
-//! 
-//! This crate is based on the design of Unity DoTS.
 
-pub use entity::{
+pub use archetype::Archetype;
+pub use chunk::Chunk;
+pub use component::{
     Component,
-    ComponentType,
     ComponentTypeID,
-    Archetype,
-    EntityComponentIterator,
-    EntityID,
 };
+pub use entity::EntityID;
+pub use snapshot::Snapshot;
 pub use universe::Universe;
-pub use chunk::{
-    Zone,
-    Chunk,
-    ChunkSet,
-};
-pub use snapshot::{
-    Snapshot,
-    SnapshotWriter,
-    SnapshotWriterGuard,
-};
-pub use world::{
-    World,
-    CommandBuffer,
-};
-pub use system::{  
+pub use world::World;
+
+pub use command_buffer::CommandBuffer;
+pub use system::{
     System,
-    SystemRegistration,
-    SystemSet,
+    BoxSystem,
+    SystemGroup,
 };
 
-mod sorted_vec;
 mod reusable;
+mod sorted_vec;
+
+pub mod component;
+pub mod component_data;
+mod entity;
+pub mod archetype;
 
 pub mod universe;
 pub mod chunk;
+pub mod chunk_set;
 pub mod snapshot;
 
-pub mod entity;
+mod command_buffer;
+
 pub mod world;
 pub mod system;
