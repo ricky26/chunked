@@ -18,9 +18,6 @@ pub use system::{
     SystemGroup,
 };
 
-mod reusable;
-mod sorted_vec;
-
 pub mod component;
 pub mod component_data;
 mod entity;
