@@ -23,7 +23,6 @@ project. However, if you're interested anyway:
   very little processing.
   
 - All operations on the world are done via snapshots, which are copied on write.
-  This allows you to take snapshots.
   
   This can be used, for example, to copy the latest snapshot to the rendering
   thread between updates, allowing for a blocking-free rendering thread.
@@ -88,7 +87,7 @@ would probably be better to expose a simpler abstraction.
 
 # Project structure
 
- - `packages/chunked` - The core package imlpementing the ECS.
+ - `packages/chunked` - The core package implementing the ECS.
  - `examples/orbits` - An N-Body simulation example.
 
 # License
