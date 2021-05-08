@@ -39,7 +39,7 @@ impl System for ApplyNewtonianAccel {
             [
                 Lock::Read(Position::type_id()),
                 Lock::Write(Velocity::type_id()),
-            ], |mut tx| {
+            ], move |mut tx| {
                 tx.par_iter_chunks_mut().for_each(|chunk_a| {
                     let ids_a = chunk_a.components::<EntityID>().unwrap();
                     let positions_a = chunk_a.components::<Position>().unwrap();
