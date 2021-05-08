@@ -1,6 +1,6 @@
 [package]
 name = "chunked"
-version = "0.1.0"
+version = "0.1.1"
 description = "An Entity Component System that works by organising like entities into chunks"
 categories = ["data-structures", "game-development"]
 keywords = ["gamedev", "ecs"]

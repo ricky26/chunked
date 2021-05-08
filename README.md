@@ -7,11 +7,11 @@ used for games. One of the benefits of an ECS is that you can isolate
 individual behaviours (increasing reuse) and manage components en masse
 (which can lead to some pretty nice optimisations).
 
-# Why should I use Chunky?
+# Why should I use Chunked?
 Honestly, at this point, you probably shouldn't. It's essentially just a toy
 project. However, if you're interested anyway:
 
-- Chunky organises like entities into chunks, rather than organising by
+- Chunked organises like entities into chunks, rather than organising by
   component, or by entity. This can reduce allocation load and still allow
   the benefits of structures-of-arrays for parallel compute.
   
