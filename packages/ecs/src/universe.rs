@@ -131,9 +131,8 @@ impl Universe {
 
         let mut wr = self.sync.write().unwrap();
         let id = wr.archetypes.len();
-        let new_archetype = unsafe {
-            Arc::new(Archetype::new(self, component_types, id))
-        };
+        let new_archetype =
+            Arc::new(Archetype::new(self, component_types, id));
         wr.archetypes.push(new_archetype.clone());
         wr.archetype_lookup.insert(ArchetypeSetEntry::Entry(new_archetype.clone()));
         new_archetype

@@ -32,17 +32,14 @@ impl<F> System for F
 
 /// A registration used for building `SystemGroups`s.
 pub struct BoxSystem {
-    system: Box<dyn System>,
+    system: Box<dyn System + Send>,
     before: Vec<SystemID>,
     after: Vec<SystemID>,
 }
 
-unsafe impl Send for BoxSystem {}
-unsafe impl Sync for BoxSystem {}
-
 impl BoxSystem {
     /// Create a new system from the given function.
-    pub fn new<S: System + 'static>(s: S) -> BoxSystem {
+    pub fn new<S: System + Send + 'static>(s: S) -> BoxSystem {
         BoxSystem {
             system: Box::new(s),
 
@@ -160,7 +157,7 @@ impl SystemGroup {
     pub async fn update(&mut self) {
         let mut pending = self.systems.iter_mut()
             .enumerate()
-            .map(|(idx, s)| (SystemID(idx as u32), s, 0))
+            .map(|(idx, s)| (idx, s, 0))
             .collect::<Vec<_>>();
         let mut running = FuturesUnordered::new();
         let mut last_completed = None;
@@ -168,21 +165,20 @@ impl SystemGroup {
         loop {
             let mut idx = 0;
             while idx < pending.len() {
-                let mut n = pending[idx].2;
-                let (start, end) = self.system_dependencies[idx];
-                let rest = &self.dependencies[start + n..end];
+                let (system_id, _, n) = &mut pending[idx];
+                let (start, end) = self.system_dependencies[*system_id];
+                let rest = &self.dependencies[start + *n..end];
 
                 if !rest.is_empty() && rest.first().copied() == last_completed {
-                    n += 1;
-                    pending[idx].2 = n + 1;
+                    *n += 1;
                 }
 
-                if start + n >= end {
+                if start + *n >= end {
                     let (id, sys, _) = pending.remove(idx);
 
                     let f = async move {
                         sys.update().await;
-                        id
+                        SystemID(id as u32)
                     }.boxed();
                     running.push(f);
                     continue;

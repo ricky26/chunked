@@ -208,7 +208,7 @@ unsafe impl Sync for Archetype {}
 
 impl Archetype {
     /// Create a new archetype given the component set.
-    pub unsafe fn new(universe: &Arc<Universe>, component_types: impl ComponentSet, id: usize) -> Archetype {
+    pub(crate) fn new(universe: &Arc<Universe>, component_types: impl ComponentSet, id: usize) -> Archetype {
         let chunk_capacity = universe.chunk_size();
         let component_types = component_types.into_owned();
         let (component_offsets, chunk_layout) = Archetype::calculate_layout(&component_types, chunk_capacity);

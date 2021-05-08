@@ -41,7 +41,6 @@ pub struct Chunk {
 }
 
 unsafe impl Send for Chunk {}
-
 unsafe impl Sync for Chunk {}
 
 impl Chunk {
