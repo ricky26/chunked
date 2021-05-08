@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::time::{Duration, Instant, sleep_until};
 
 use async_trait::async_trait;
 use futures::executor::block_on;
@@ -163,7 +164,6 @@ fn render_thread(world: Arc<World>) {
                             .transform
                             .trans(x, y);
 
-                        // Draw a box rotating around the middle of the screen.
                         rectangle(WHITE, square, transform, gl);
                     }
                 }
@@ -184,7 +184,7 @@ async fn main() {
     // Populate universe!
     {
         const NUM_ENTITIES: usize = 1024;
-        const VEL_SCALE: f32 = 0.0001;
+        const VEL_SCALE: f32 = 0.005;
 
         let mut command_buffer = CommandBuffer::new();
         let mut rng = rand::thread_rng();
@@ -217,8 +217,9 @@ async fn main() {
             .after(accel_sys));
 
         loop {
+            let deadline = Instant::now() + Duration::from_millis(16);
             system_set.update().await;
-            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            sleep_until(deadline).await;
         }
     };
     tokio::spawn(update);
