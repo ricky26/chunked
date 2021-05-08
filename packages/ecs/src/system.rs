@@ -37,6 +37,9 @@ pub struct BoxSystem {
     after: Vec<SystemID>,
 }
 
+unsafe impl Send for BoxSystem {}
+unsafe impl Sync for BoxSystem {}
+
 impl BoxSystem {
     /// Create a new system from the given function.
     pub fn new<S: System + 'static>(s: S) -> BoxSystem {
@@ -71,17 +74,6 @@ impl BoxSystem {
     /// Run one update of this system.
     pub fn update(&mut self) -> BoxFuture<()> {
         self.system.update()
-        //(self.run)(self.ptr)
-    }
-}
-
-unsafe impl Send for BoxSystem {}
-
-unsafe impl Sync for BoxSystem {}
-
-impl Drop for BoxSystem {
-    fn drop(&mut self) {
-        //(self.drop)(self.ptr);
     }
 }
 
