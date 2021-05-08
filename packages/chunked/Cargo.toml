@@ -2,8 +2,14 @@
 name = "chunked"
 version = "0.1.0"
 description = "An Entity Component System that works by organising like entities into chunks"
+categories = ["data-structures", "game-development"]
+keywords = ["gamedev", "ecs"]
 license = "MIT"
 authors = ["Ricky Taylor <rickytaylor26@gmail.com>"]
+homepage = "https://github.com/ricky26/chunked"
+repository = "https://github.com/ricky26/chunked"
+documentation = "https://docs.rs/chunked"
+readme = "../../README.md"
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
