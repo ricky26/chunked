@@ -134,9 +134,9 @@ impl Snapshot {
 
 impl Debug for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Snapshot {{\n")?;
+        writeln!(f, "Snapshot {{")?;
 
-        write!(f, "  Chunk Sets:\n")?;
+        writeln!(f, "  Chunk Sets:")?;
         for (arch_id, chunk_set) in self.chunk_sets.iter().enumerate() {
             if chunk_set.is_empty() {
                 continue
@@ -148,21 +148,21 @@ impl Debug for Snapshot {
             for ty in archetype.component_types().as_slice() {
                 write!(f, "{:?}, ", ty)?;
             }
-            write!(f, "\n")?;
+            writeln!(f)?;
 
-            write!(f, "      Chunks:\n")?;
+            writeln!(f, "      Chunks:")?;
             for chunk in chunk_set.iter() {
-                write!(f, "        {:?} - {} entities\n", chunk.deref() as *const _, chunk.len())?;
+                writeln!(f, "        {:?} - {} entities", chunk.deref() as *const _, chunk.len())?;
 
                 let ids = chunk.components::<EntityID>().unwrap();
 
                 for entity_id in ids {
-                    write!(f, "          Entity {:?} - Chunk {:?}\n", entity_id, chunk.deref() as *const _)?;
+                    writeln!(f, "          Entity {:?} - Chunk {:?}", entity_id, chunk.deref() as *const _)?;
                 }
             }
         }
 
-        write!(f, "}}\n")
+        writeln!(f, "}}")
     }
 }
 
@@ -231,7 +231,7 @@ impl<'a> SnapshotEditList<'a> {
                 .clone()
                 .and_then(|old| new_archetype.clone().map(|new| (old, new)))
                 .map_or(true, |(a, b)| !Arc::ptr_eq(&a, &b));
-            let is_noop = !is_empty && !is_move && component_data.len() == 0;
+            let is_noop = !is_empty && !is_move && component_data.is_empty();
             if is_noop {
                 continue;
             }

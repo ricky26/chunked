@@ -40,6 +40,11 @@ impl<'a> ChunkSetGuard<'a> {
         self.chunk_set.len()
     }
 
+    /// Returns true if this chunk set contains no chunks.
+    pub fn is_empty(&self) -> bool {
+        self.chunk_set.is_empty()
+    }
+
     /// Fetch a single `Chunk` from this guard.
     pub fn chunk_mut(&mut self, idx: usize) -> Option<ChunkGuard<'_>> {
         self.chunk_set.get(idx).map(|chunk| {

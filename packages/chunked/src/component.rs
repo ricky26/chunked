@@ -100,7 +100,7 @@ impl AutoComponentTypeID {
 
     /// Get the `ComponentTypeID` this struct wraps.
     pub fn get<T: Component>(&self) -> ComponentTypeID {
-        self.0.get_or_init(ComponentTypeID::register::<T>).clone()
+        *self.0.get_or_init(ComponentTypeID::register::<T>)
     }
 }
 
@@ -131,7 +131,7 @@ impl ComponentRegistration {
     pub fn new<T: Component>(type_id: ComponentTypeID) -> ComponentRegistration {
         fn default<T: Component>(ptr: &mut [u8]) {
             assert_eq!(ptr.len(), std::mem::size_of::<T>());
-            let ptr: &mut T = unsafe { std::mem::transmute(ptr.as_ptr()) };
+            let ptr: &mut T = unsafe { &mut *(ptr.as_ptr() as *mut T) };
             let d = T::default();
             *ptr = d;
         }

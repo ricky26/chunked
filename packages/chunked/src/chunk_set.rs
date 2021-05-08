@@ -322,6 +322,12 @@ impl ChunkSet {
     }
 }
 
+impl Default for ChunkSet {
+    fn default() -> Self {
+        ChunkSet::new()
+    }
+}
+
 impl Deref for ChunkSet {
     type Target = [Arc<Chunk>];
 

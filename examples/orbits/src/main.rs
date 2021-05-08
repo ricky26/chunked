@@ -154,9 +154,7 @@ fn render_thread(world: Arc<World>) {
                 for chunk in snap.iter_chunks() {
                     let positions = chunk.components::<Position>().unwrap();
 
-                    for idx in 0..positions.len() {
-                        let Position(x, y, _) = positions[idx];
-
+                    for Position(x, y, _) in positions.iter().copied() {
                         let x = ((x as f64) * scale_x * SCALE) + scale_x;
                         let y = ((y as f64) * scale_y * SCALE) + scale_y;
 
@@ -170,7 +168,7 @@ fn render_thread(world: Arc<World>) {
             });
         }
 
-        if let Some(_) = e.close_args() {
+        if e.close_args().is_some() {
             std::process::exit(0);
         }
     }

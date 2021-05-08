@@ -15,6 +15,10 @@ pub struct ComponentValueRef<'a> {
 
 impl<'a> ComponentValueRef<'a> {
     /// Create a `ComponentValueRef` from a raw byte array.
+    ///
+    /// # Safety
+    /// The `data` slice is expected to be the exact bytes of an instance of
+    /// the type referred to by `type_id`.
     pub unsafe fn from_raw(type_id: ComponentTypeID, data: &'a [u8]) -> ComponentValueRef<'a> {
         ComponentValueRef {
             type_id,
@@ -35,7 +39,7 @@ impl<'a> ComponentValueRef<'a> {
     /// Attempt to downcast this value ref back to a reference to the component type.
     pub fn downcast<T: Component>(&self) -> Option<&T> {
         if T::type_id() == self.type_id {
-            Some(unsafe { std::mem::transmute(self.slice.as_ptr()) })
+            Some(unsafe { &*(self.slice.as_ptr() as *const T) })
         } else {
             None
         }
@@ -140,6 +144,11 @@ impl<'a> ComponentDataVec<'a> {
         self.0.len()
     }
 
+    /// Check whether this `ComponentDataVec` is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Remove all component data from this `ComponentDataVec`.
     pub fn clear(&mut self) {
         self.0.clear()
@@ -155,10 +164,15 @@ impl<'a> ComponentDataVec<'a> {
 
     /// Remove a component from this `ComponentDataVec`.
     pub fn remove_component(&mut self, type_id: ComponentTypeID) {
-        match self.0.binary_search_by_key(&type_id, |r| r.type_id()) {
-            Ok(idx) => { self.0.remove(idx); }
-            Err(_) => {}
-        };
+        if let Ok(idx) = self.0.binary_search_by_key(&type_id, |r| r.type_id()) {
+            self.0.remove(idx);
+        }
+    }
+}
+
+impl<'a> Default for ComponentDataVec<'a> {
+    fn default() -> Self {
+        ComponentDataVec::new()
     }
 }
 
@@ -206,6 +220,11 @@ impl<'a, 'b> ComponentDataVecWriter<'a, 'b> {
         self.vec.len() - self.offset
     }
 
+    /// Returns true if this writer contains no components.
+    pub fn is_empty(&self) -> bool {
+        self.len() > 0
+    }
+
     /// Set a component's value.
     pub fn set_component(&mut self, component_data: ComponentValueRef<'a>) {
         let slice = &mut self.vec[self.offset..];
@@ -219,10 +238,9 @@ impl<'a, 'b> ComponentDataVecWriter<'a, 'b> {
     /// Remove a component from this writer.
     pub fn remove_component(&mut self, type_id: ComponentTypeID) {
         let slice = &mut self.vec[self.offset..];
-        match slice.binary_search_by_key(&type_id, |r| r.type_id()) {
-            Ok(idx) => { self.vec.remove(self.offset + idx); }
-            Err(_) => {}
-        };
+        if let Ok(idx) = slice.binary_search_by_key(&type_id, |r| r.type_id()) {
+            self.vec.remove(self.offset + idx);
+        }
     }
 
     /// Return the range of entries in the `Vec` which this writer uses.

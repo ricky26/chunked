@@ -14,7 +14,7 @@ fn main() {
     let entity = universe.allocate_entity();
     command_buffer.set_component(entity, &MyComponent(3));
 
-    let mut snapshot = Arc::new(Snapshot::empty(universe.clone()));
+    let mut snapshot = Arc::new(Snapshot::empty(universe));
     snapshot.modify(command_buffer.iter_edits());
 
     println!("snapshot: {:?}", snapshot);

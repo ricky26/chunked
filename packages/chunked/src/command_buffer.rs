@@ -123,6 +123,12 @@ impl CommandBuffer {
     }
 }
 
+impl Default for CommandBuffer {
+    fn default() -> Self {
+        CommandBuffer::new()
+    }
+}
+
 /// An iterator over the edit list of a command buffer.
 pub struct CommandBufferIterator<'a> {
     buffer: &'a CommandBuffer,

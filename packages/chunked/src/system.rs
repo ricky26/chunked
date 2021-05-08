@@ -197,3 +197,9 @@ impl SystemGroup {
         }
     }
 }
+
+impl Default for SystemGroup {
+    fn default() -> Self {
+        SystemGroup::new()
+    }
+}

@@ -104,9 +104,8 @@ impl Universe {
     /// Generally, one should prefer `ensure_archetype` unless you have a
     /// particular reason to not want the archetype to be created, as it handles
     /// the fast case of the archetype already existing.
-    pub fn archetype<'a, T: ComponentSet>(&self, component_types: T) -> Option<Arc<Archetype>> {
-        let component_types = component_types.as_ref();
-        let key = ArchetypeSetEntry::Key(component_types);
+    pub fn archetype<T: ComponentSet>(&self, component_types: &T) -> Option<Arc<Archetype>> {
+        let key = ArchetypeSetEntry::Key(component_types.as_ref());
 
         let rd = self.sync.read().unwrap();
         rd.archetype_lookup.get(&key).cloned().map(|x| {
@@ -121,11 +120,11 @@ impl Universe {
     ///
     /// The archetype might not contain the given types in the order requested,
     /// they will be sorted by their unique ID.
-    pub fn ensure_archetype<'a>(self: &Arc<Universe>, component_types: impl ComponentSet) -> Arc<Archetype> {
+    pub fn ensure_archetype(self: &Arc<Universe>, component_types: impl ComponentSet) -> Arc<Archetype> {
         let component_types = component_types.into_owned();
 
         // Optimistically try just a read lock first.
-        if let Some(existing) = self.archetype(component_types.as_ref()) {
+        if let Some(existing) = self.archetype(&component_types) {
             return existing;
         }
 

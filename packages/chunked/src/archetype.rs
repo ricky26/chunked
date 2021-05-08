@@ -31,6 +31,11 @@ pub trait ComponentSetExt: ComponentSet {
     /// Return the number of components in the component set.
     fn len(&self) -> usize { self.as_slice().len() }
 
+    /// Returns true if this `ComponentSet` contains no components.
+    fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+
     /// Return a borrowed version of this `ComponentSet`.
     fn as_ref(&self) -> ComponentSliceSet {
         ComponentSliceSet(self.as_slice())
@@ -97,20 +102,23 @@ impl ComponentVecSet {
         self.0.len()
     }
 
+    /// Returns true if this component set contains no components.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Insert a component type into this set.
     pub fn insert(&mut self, component_type: ComponentTypeID) {
-        match self.0.binary_search(&component_type) {
-            Ok(_) => {}
-            Err(idx) => self.0.insert(idx, component_type),
+        if let Err(idx) = self.0.binary_search(&component_type) {
+            self.0.insert(idx, component_type);
         }
     }
 
     /// Remove a component type from this set.
     pub fn remove(&mut self, component_type: ComponentTypeID) {
-        match self.0.binary_search(&component_type) {
-            Ok(idx) => { self.0.remove(idx); }
-            Err(_) => {}
-        };
+        if let Ok(idx) = self.0.binary_search(&component_type) {
+            self.0.remove(idx);
+        }
     }
 }
 
@@ -150,14 +158,14 @@ impl<'a> ComponentSliceSet<'a> {
         let mut has_entity_id = false;
         let mut last: Option<ComponentTypeID> = None;
 
-        for component_type in component_types.iter().cloned() {
+        for component_type in component_types.iter().copied() {
             if let Some(l) = last {
                 if l.cmp(&component_type) != Ordering::Less {
                     return None;
                 }
             }
 
-            last = Some(component_type.clone());
+            last = Some(component_type);
             if component_type == EntityID::type_id() {
                 has_entity_id = true;
             }
@@ -204,6 +212,7 @@ pub struct Archetype {
 }
 
 unsafe impl Send for Archetype {}
+
 unsafe impl Sync for Archetype {}
 
 impl Archetype {
@@ -230,7 +239,7 @@ impl Archetype {
     pub fn universe(&self) -> &Weak<Universe> { &self.universe }
 
     /// Return the unique archetype ID for this universe.
-    pub fn id(&self) -> usize { return self.id; }
+    pub fn id(&self) -> usize { self.id }
 
     /// Return the sorted list of component types in this archetype.
     pub fn component_types(&self) -> &ComponentVecSet {
@@ -311,6 +320,11 @@ impl Archetype {
     }
 
     /// Free a previously allocated page.
+    ///
+    /// # Safety
+    /// Calling `free_page` on a pointer which was not allocated by this
+    /// `Archetype` can cause invalid memory access either whilst freeing the
+    /// page, or when it is reused.
     pub unsafe fn free_page(&self, p: NonNull<u8>) {
         if self.chunk_capacity > 0 {
             self.free_list.push(p)

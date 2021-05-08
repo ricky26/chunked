@@ -45,6 +45,11 @@ unsafe impl Sync for Chunk {}
 
 impl Chunk {
     /// Create a new chunk from the raw parts.
+    ///
+    /// # Safety
+    /// `ptr` must be a pointer to memory laid out as specified in `Archetype::chunk_layout()`.
+    ///
+    /// Generally `Archetype::new_chunk` should be called instead.
     pub unsafe fn from_raw(archetype: Arc<Archetype>, ptr: NonNull<u8>, len: usize) -> Chunk {
         Chunk {
             archetype,
@@ -63,6 +68,11 @@ impl Chunk {
         self.len
     }
 
+    /// Returns true if this chunk contains no entities.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Get the total capacity of this chunk (usually this is fixed).
     pub fn capacity(&self) -> usize {
         self.archetype.chunk_capacity()
@@ -77,7 +87,7 @@ impl Chunk {
     pub fn components<T: Component>(&self) -> Option<&[T]> {
         self.archetype.component_offset(T::type_id()).map(|offset| {
             unsafe {
-                let ptr = self.ptr.as_ptr().offset(offset as isize) as *const T;
+                let ptr = self.ptr.as_ptr().add(offset) as *const T;
                 &*std::ptr::slice_from_raw_parts(ptr, self.len)
             }
         })
@@ -87,7 +97,7 @@ impl Chunk {
     pub fn components_mut<T: Component>(&mut self) -> Option<&mut [T]> {
         self.archetype.component_offset(T::type_id()).map(|offset| {
             unsafe {
-                let ptr = self.ptr.as_ptr().offset(offset as isize) as *mut T;
+                let ptr = self.ptr.as_ptr().add(offset) as *mut T;
                 &mut *std::ptr::slice_from_raw_parts_mut(ptr, self.len)
             }
         })
@@ -139,7 +149,7 @@ impl Chunk {
 
             let dest_slice = {
                 unsafe {
-                    let ptr = self.ptr.as_ptr().offset(item_offset as isize);
+                    let ptr = self.ptr.as_ptr().add(item_offset);
                     &mut *std::ptr::slice_from_raw_parts_mut(ptr, size)
                 }
             };
@@ -183,14 +193,14 @@ impl Chunk {
             unsafe {
                 if num_to_move > 0 {
                     let count = size * num_to_move;
-                    let from = self.ptr.as_ptr().offset(begin_offset as isize);
-                    let to = from.offset(size as isize);
+                    let from = self.ptr.as_ptr().add(begin_offset);
+                    let to = from.add(size);
 
                     ptr::copy(from, to, count);
                 }
 
                 let dest_slice = {
-                    let ptr = self.ptr.as_ptr().offset(begin_offset as isize);
+                    let ptr = self.ptr.as_ptr().add(begin_offset);
                     &mut *std::ptr::slice_from_raw_parts_mut(ptr, size)
                 };
 
@@ -242,13 +252,13 @@ impl Chunk {
             unsafe {
                 if num_to_move > 0 {
                     let count = size * num_to_move;
-                    let from = self.ptr.as_ptr().offset(insert_offset as isize);
-                    let to = from.offset((n * size) as isize);
+                    let from = self.ptr.as_ptr().add(insert_offset);
+                    let to = from.add(n * size);
                     ptr::copy(from, to, count);
                 }
 
-                let write_ptr = self.ptr.as_ptr().offset(insert_offset as isize);
-                let read_ptr = other.ptr.as_ptr().offset(source_offset as isize);
+                let write_ptr = self.ptr.as_ptr().add(insert_offset);
+                let read_ptr = other.ptr.as_ptr().add(source_offset);
                 std::ptr::copy_nonoverlapping(read_ptr, write_ptr, n);
             }
         }
@@ -320,8 +330,8 @@ impl Chunk {
             let src_offset = offset + (size * src_idx);
 
             unsafe {
-                let write_ptr = self.ptr.as_ptr().offset(dest_offset as isize);
-                let read_ptr = self.ptr.as_ptr().offset(src_offset as isize);
+                let write_ptr = self.ptr.as_ptr().add(dest_offset);
+                let read_ptr = self.ptr.as_ptr().add(src_offset);
                 std::ptr::copy(read_ptr, write_ptr, n * size);
             }
         }
@@ -557,7 +567,7 @@ impl Iterator for ChunkEntityData {
             + (size * self.entity_index);
 
         let value = unsafe {
-            let ptr = self.chunk.as_ref().ptr.as_ptr().offset(offset as isize);
+            let ptr = self.chunk.as_ref().ptr.as_ptr().add(offset);
             let slice = std::slice::from_raw_parts(ptr, size);
             ComponentValueRef::from_raw(type_id, slice)
         };

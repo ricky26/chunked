@@ -38,26 +38,17 @@ pub enum Lock {
 impl Lock {
     /// Returns true if this is a read lock.
     pub fn is_read(&self) -> bool {
-        match self {
-            Lock::Read(_) => true,
-            _ => false,
-        }
+        matches!(self, Lock::Read(_))
     }
 
     /// Returns true if this is a write lock.
     pub fn is_write(&self) -> bool {
-        match self {
-            Lock::Write(_) => true,
-            _ => false,
-        }
+        matches!(self, Lock::Write(_))
     }
 
     /// Returns true if this is an exclusion.
     pub fn is_exclude(&self) -> bool {
-        match self {
-            Lock::Exclude(_) => true,
-            _ => false,
-        }
+        matches!(self, Lock::Exclude(_))
     }
 
     /// Return the component type for this lock.

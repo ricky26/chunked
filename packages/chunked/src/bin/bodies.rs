@@ -170,10 +170,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dest = std::io::stdout();
     let mut last_positions = HashMap::new();
 
-    write!(&mut dest, "<?xml version=\"1.0\" standalone=\"no\"?>\n")?;
-    write!(&mut dest, "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.0//EN\" \"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd\">\n")?;
-    write!(&mut dest, "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"{}\" width=\"{}\">", SIZE.0, SIZE.1)?;
-    write!(&mut dest, "<rect width=\"100%\" height=\"100%\" fill=\"black\"/>")?;
+    writeln!(&mut dest, "<?xml version=\"1.0\" standalone=\"no\"?>")?;
+    writeln!(&mut dest, "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.0//EN\" \"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd\">")?;
+    writeln!(&mut dest, "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"{}\" width=\"{}\">", SIZE.0, SIZE.1)?;
+    writeln!(&mut dest, "<rect width=\"100%\" height=\"100%\" fill=\"black\"/>")?;
 
     for _ in 0..NUM_ITER {
         for _ in 0..10usize {
@@ -199,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let x2 = x * SCALE.0 + OFFSET.0;
                     let y2 = y * SCALE.1 + OFFSET.1;
 
-                    write!(&mut dest,
+                    writeln!(&mut dest,
                            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" style=\"stroke:rgba(255,0,0,{});stroke-width:1\" />",
                            x1, y1, x2, y2, a)?;
                 }
@@ -209,6 +209,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    write!(&mut dest, "</svg>")?;
+    writeln!(&mut dest, "</svg>")?;
     Ok(())
 }

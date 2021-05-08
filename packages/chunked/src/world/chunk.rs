@@ -40,6 +40,11 @@ impl<'a> ChunkGuard<'a> {
         self.get().len()
     }
 
+    /// Returns true if this chunk contains no entities.
+    pub fn is_empty(&self) -> bool {
+        self.get().len() == 0
+    }
+
     /// Get a set of components from this chunk.
     pub fn components<T: Component>(&self) -> Option<&[T]> {
         if T::type_id() == EntityID::type_id() {
