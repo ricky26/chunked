@@ -1,3 +1,7 @@
+[![Documentation](https://docs.rs/chunked/badge.svg)](https://docs.rs/chunked/)
+[![Crates.io](https://img.shields.io/crates/v/chunked.svg)](https://crates.io/crates/chunked)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 # Chunked ECS
 This repository houses the Chunked ECS.
 
