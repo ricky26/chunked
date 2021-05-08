@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 use rayon::iter::ParallelIterator;
 
-use ecs::{BoxSystem, CommandBuffer, component, Component, EntityID, System, SystemGroup, Universe, World};
-use ecs::world::Lock;
+use chunked::{BoxSystem, CommandBuffer, component, Component, EntityID, System, SystemGroup, Universe, World};
+use chunked::world::Lock;
 
 const G: f32 = 10.0;
 const TIME_STEP: f32 = 1.0;

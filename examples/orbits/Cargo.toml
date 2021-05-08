@@ -1,6 +1,7 @@
 [package]
 name = "orbits"
 version = "0.1.0"
+license = "MIT"
 authors = ["Ricky Taylor <rickytaylor26@gmail.com>"]
 edition = "2018"
 
@@ -11,7 +12,7 @@ piston = "0.53.0"
 piston2d-graphics = "0.40.0"
 pistoncore-glutin_window = "0.69.0"
 piston2d-opengl_graphics = "0.78.0"
-ecs = { path = "../ecs" }
+chunked = { path = "../../packages/chunked" }
 futures = "0.3.14"
 async-trait = "0.1.30"
 tokio = { version = "1.5.0", features = ["full"] }

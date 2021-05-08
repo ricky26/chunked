@@ -11,8 +11,8 @@ use piston::window::WindowSettings;
 use rand::Rng;
 use rayon::prelude::*;
 
-use ecs::{BoxSystem, CommandBuffer, component, Component, EntityID, System, SystemGroup, Universe, World};
-use ecs::world::Lock;
+use chunked::{BoxSystem, CommandBuffer, component, Component, EntityID, System, SystemGroup, Universe, World};
+use chunked::world::Lock;
 
 const G: f32 = 6.67408e-11;
 const TIME_STEP: f32 = 1.0;

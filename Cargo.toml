@@ -1,6 +1,6 @@
 [workspace]
 
 members = [
-    "packages/ecs",
-    "packages/orbits",
+    "packages/chunked",
+    "examples/orbits",
 ]

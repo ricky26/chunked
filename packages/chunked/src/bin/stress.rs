@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ecs::{CommandBuffer, component, Universe, Snapshot};
+use chunked::{CommandBuffer, component, Universe, Snapshot};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MyComponent(i32);

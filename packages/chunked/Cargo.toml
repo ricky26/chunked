@@ -1,6 +1,8 @@
 [package]
-name = "ecs"
+name = "chunked"
 version = "0.1.0"
+description = "An Entity Component System that works by organising like entities into chunks"
+license = "MIT"
 authors = ["Ricky Taylor <rickytaylor26@gmail.com>"]
 edition = "2018"
 
