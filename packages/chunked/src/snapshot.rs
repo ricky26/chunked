@@ -104,15 +104,17 @@ impl Snapshot {
     ///
     /// If this is the only `Arc` to this snapshot, the memory will be reused. This is
     /// also true of the contained `ChunkSet`s and `Chunk`s.
-    pub fn modify<'a, E>(self: &mut Arc<Self>, edits: E)
+    pub fn modify<'a, 'b, E>(this: impl Into<Modifiable<'b, Self>>, edits: E)
         where E: Iterator<Item=Edit<'a>>
     {
-        let edit_list = SnapshotEditList::from_edits(self, edits);
+        let mut this = this.into();
+
+        let edit_list = SnapshotEditList::from_edits(&mut this, edits);
         if !edit_list.is_empty() {
             let archetype_edits = edit_list.chunk_set_edits;
 
-            let universe = self.universe.clone();
-            let edit_snap = Arc::make_mut(self);
+            let universe = this.universe.clone();
+            let edit_snap = this.make_mut();
             if edit_snap.chunk_sets.len() < archetype_edits.len() {
                 edit_snap.chunk_sets.resize(archetype_edits.len(), ChunkSet::new());
             }
@@ -139,7 +141,7 @@ impl Debug for Snapshot {
         writeln!(f, "  Chunk Sets:")?;
         for (arch_id, chunk_set) in self.chunk_sets.iter().enumerate() {
             if chunk_set.is_empty() {
-                continue
+                continue;
             }
 
             let archetype = self.universe.archetype_by_id(arch_id).unwrap();
@@ -166,6 +168,68 @@ impl Debug for Snapshot {
     }
 }
 
+/// An trait used to improve the ergonomics of `Snapshot::modify`.
+pub trait ModifySnapshot<'a>: Into<Modifiable<'a, Snapshot>> {
+    fn modify<'b, E: Iterator<Item=Edit<'b>>>(self, edits: E) {
+        Snapshot::modify(self, edits)
+    }
+}
+
+impl<'a, T: Into<Modifiable<'a, Snapshot>>> ModifySnapshot<'a> for T {}
+
+/// A const reference to a `T` which can be promoted to a mutable one,
+/// whilst similar to `Cow`, this also supports `Arc`s.
+pub enum Modifiable<'a, T: Clone> {
+    /// Use an `Arc` to promote with `Arc::make_mut`.
+    Arc(&'a mut Arc<T>),
+    /// Use a `Cow` to promote with `Cow::to_owned`.
+    Cow(&'a mut Cow<'a, T>),
+    /// Use a mutable reference, which does not need to be promoted.
+    Ref(&'a mut T),
+}
+
+impl<'a, T: Clone> Modifiable<'a, T> {
+    /// Promote this `Modifiable` to a mutable `T`, if it is not already,
+    /// and return a mutable reference.
+    pub fn make_mut(&mut self) -> &mut T {
+        match self {
+            Modifiable::Arc(x) => Arc::make_mut(x),
+            Modifiable::Cow(x) => x.to_mut(),
+            Modifiable::Ref(x) => x,
+        }
+    }
+}
+
+impl<'a, T: Clone> Deref for Modifiable<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Modifiable::Arc(x) => &**x,
+            Modifiable::Cow(x) => &*x,
+            Modifiable::Ref(x) => &*x,
+        }
+    }
+}
+
+impl<'a, T: Clone> From<&'a mut T> for Modifiable<'a, T> {
+    fn from(x: &'a mut T) -> Self {
+        Modifiable::Ref(x)
+    }
+}
+
+impl <'a, T: Clone> From<&'a mut Arc<T>> for Modifiable<'a, T> {
+    fn from(x: &'a mut Arc<T>) -> Self {
+        Modifiable::Arc(x)
+    }
+}
+
+impl<'a, T: Clone> From<&'a mut Cow<'a, T>> for Modifiable<'a, T> {
+    fn from(x: &'a mut Cow<'a, T>) -> Self {
+        Modifiable::Cow(x)
+    }
+}
+
 struct SnapshotEditList<'a> {
     component_data: Vec<ComponentValueRef<'a>>,
     chunk_set_edits: Vec<Vec<ChunkEdit>>,
@@ -180,7 +244,7 @@ impl<'a> SnapshotEditList<'a> {
         &mut edits[id]
     }
 
-    pub fn from_edits<E>(snap: &mut Arc<Snapshot>, edits: E) -> SnapshotEditList<'a>
+    pub fn from_edits<E>(snap: &mut Modifiable<'_, Snapshot>, edits: E) -> SnapshotEditList<'a>
         where E: Iterator<Item=Edit<'a>>
     {
         let mut component_data = Vec::new();
@@ -241,7 +305,7 @@ impl<'a> SnapshotEditList<'a> {
                 SnapshotEditList::get_chunk_set_edits(&mut chunk_set_edits, &arch)
                     .push(ChunkEdit(id, ChunkAction::Remove));
 
-                let edit_snap = Arc::make_mut(snap);
+                let edit_snap = snap.make_mut();
                 edit_snap.entities.remove(&id);
             }
 
@@ -252,7 +316,7 @@ impl<'a> SnapshotEditList<'a> {
                     .push(ChunkEdit(id, ChunkAction::Upsert(start, end)));
 
                 if is_move {
-                    let edit_snap = Arc::make_mut(snap);
+                    let edit_snap = snap.make_mut();
                     edit_snap.entities.insert(id, arch.id());
                 }
             }

@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use chunked::{CommandBuffer, component, Snapshot, Universe};
+use chunked::{CommandBuffer, component, ModifySnapshot, Snapshot, Universe};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MyComponent(i32);
@@ -14,7 +12,7 @@ fn main() {
     let entity = universe.allocate_entity();
     command_buffer.set_component(entity, &MyComponent(3));
 
-    let mut snapshot = Arc::new(Snapshot::empty(universe));
+    let mut snapshot = Snapshot::empty(universe);
     snapshot.modify(command_buffer.iter_edits());
 
     println!("snapshot: {:?}", snapshot);

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tokio::time::{Duration, Instant, sleep_until};
 
 use async_trait::async_trait;
 use futures::executor::block_on;
@@ -10,8 +9,9 @@ use piston::input::{CloseEvent, RenderEvent};
 use piston::window::WindowSettings;
 use rand::Rng;
 use rayon::prelude::*;
+use tokio::time::{Duration, Instant, sleep_until};
 
-use chunked::{BoxSystem, CommandBuffer, component, Component, EntityID, System, SystemGroup, Universe, World};
+use chunked::{BoxSystem, CommandBuffer, component, Component, EntityID, ModifySnapshot, System, SystemGroup, Universe, World};
 use chunked::world::Lock;
 
 const G: f32 = 6.67408e-11;

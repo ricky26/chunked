@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use chunked::{CommandBuffer, component, Universe, Snapshot};
+use chunked::{CommandBuffer, component, ModifySnapshot, Snapshot, Universe};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MyComponent(i32);
@@ -9,7 +7,7 @@ component!(MyComponent);
 
 fn main() {
     let universe = Universe::new();
-    let mut snapshot = Arc::new(Snapshot::empty(universe.clone()));
+    let mut snapshot = Snapshot::empty(universe.clone());
 
     for _ in 0..8 {
         let mut command_buffer = CommandBuffer::new();

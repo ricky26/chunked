@@ -7,7 +7,7 @@ pub use component::{
     ComponentTypeID,
 };
 pub use entity::EntityID;
-pub use snapshot::Snapshot;
+pub use snapshot::{Snapshot, ModifySnapshot};
 pub use universe::Universe;
 pub use world::World;
 

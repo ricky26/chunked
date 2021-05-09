@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 use rayon::iter::ParallelIterator;
 
-use chunked::{BoxSystem, CommandBuffer, component, Component, EntityID, System, SystemGroup, Universe, World};
+use chunked::{BoxSystem, CommandBuffer, component, Component, EntityID, ModifySnapshot, System, SystemGroup, Universe, World};
 use chunked::world::Lock;
 
 const G: f32 = 10.0;
@@ -200,8 +200,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let y2 = y * SCALE.1 + OFFSET.1;
 
                     writeln!(&mut dest,
-                           "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" style=\"stroke:rgba(255,0,0,{});stroke-width:1\" />",
-                           x1, y1, x2, y2, a)?;
+                             "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" style=\"stroke:rgba(255,0,0,{});stroke-width:1\" />",
+                             x1, y1, x2, y2, a)?;
                 }
 
                 last_positions.insert(*id, (x, y));
