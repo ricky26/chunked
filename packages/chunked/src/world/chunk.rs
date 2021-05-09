@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic};
 
-use crate::{Chunk, Component, EntityID, Archetype};
+use crate::{Archetype, Chunk, Component, EntityID, GenerationID};
 use crate::world::Lock;
 use crate::world::transaction::Transaction;
 
@@ -12,6 +12,7 @@ pub struct ChunkGuard<'a> {
 }
 
 unsafe impl<'a> Send for ChunkGuard<'a> {}
+
 unsafe impl<'a> Sync for ChunkGuard<'a> {}
 
 impl<'a> ChunkGuard<'a> {
@@ -25,6 +26,9 @@ impl<'a> ChunkGuard<'a> {
         }
     }
 
+    /// Fetch a mutable reference to this chunk.
+    ///
+    /// This is for internal use only and must be used with care!
     fn get(&self) -> &'static mut Chunk {
         let ptr = self.chunk as *mut _;
         unsafe { &mut *ptr }
@@ -32,7 +36,12 @@ impl<'a> ChunkGuard<'a> {
 
     /// Get the archetype this chunk belongs to.
     pub fn archetype(&self) -> &Arc<Archetype> {
-        self.get().archetype()
+        self.chunk.archetype()
+    }
+
+    /// Get the last generation this chunk was modified in.
+    pub fn generation(&self) -> GenerationID {
+        self.chunk.generation()
     }
 
     /// Get the number of entities in this chunk.
@@ -67,6 +76,8 @@ impl<'a> ChunkGuard<'a> {
 
     /// Get a mutable slice of a given type of components from a chunk.
     pub fn components_mut<T: Component>(&self) -> Option<&mut [T]> {
+        self.get().update_generation();
+
         let position = self.transaction.locks().iter()
             .position(|l| l == &Lock::Write(T::type_id()));
 

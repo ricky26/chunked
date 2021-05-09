@@ -14,7 +14,7 @@ use crate::component::{Component, ComponentTypeID};
 /// 
 /// Entity IDs are unique per World. They are not unique across worlds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntityID(usize);
+pub struct EntityID(u64);
 
 unsafe impl Component for EntityID {
     fn type_id() -> ComponentTypeID {
@@ -28,12 +28,12 @@ unsafe impl Component for EntityID {
 
 impl EntityID {
     /// Create a new EntityID given the inner unique ID.
-    pub fn new(id: usize) -> EntityID {
+    pub fn new(id: u64) -> EntityID {
         EntityID(id)
     }
 
     /// Return the inner unique ID.
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> u64 {
         self.0
     }
 }

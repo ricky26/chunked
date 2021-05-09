@@ -290,9 +290,12 @@ impl Archetype {
 
     /// Create a new chunk with a given capacity.
     pub fn new_chunk(self: Arc<Self>) -> Chunk {
-        let zone = self.clone();
+        // Universe should contain a reference to us, so this should always be possible.
+        let universe = self.universe.upgrade().unwrap();
+        let archetype = self.clone();
+        let generation = universe.allocate_generation();
         let ptr = self.allocate_page();
-        unsafe { Chunk::from_raw(zone, ptr, 0) }
+        unsafe { Chunk::from_raw(archetype, generation, ptr, 0) }
     }
 
     /// Deallocate all unused chunks.

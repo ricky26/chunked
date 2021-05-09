@@ -2,6 +2,7 @@
 
 use std::alloc::Layout;
 use std::cmp::{Ord, Ordering};
+use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::ops::{Bound, RangeBounds};
 use std::ptr::{self, NonNull};
@@ -9,15 +10,13 @@ use std::sync::Arc;
 
 use bit_vec::BitVec;
 
-use crate::{Archetype, EntityID};
+use crate::{Archetype, EntityID, GenerationID};
 use crate::archetype::ComponentVecSet;
 use crate::component::{
     Component,
     ComponentTypeID,
 };
-use crate::component_data::{ComponentData, ComponentValueRef, ComponentDataSlice};
-use std::convert::TryFrom;
-
+use crate::component_data::{ComponentData, ComponentDataSlice, ComponentValueRef};
 
 /// A single action on an entity in a `Chunk`.
 #[derive(Clone)]
@@ -36,11 +35,13 @@ pub(crate) struct ChunkEdit(pub EntityID, pub ChunkAction);
 /// memory.
 pub struct Chunk {
     archetype: Arc<Archetype>,
+    generation: GenerationID,
     ptr: NonNull<u8>,
     len: usize,
 }
 
 unsafe impl Send for Chunk {}
+
 unsafe impl Sync for Chunk {}
 
 impl Chunk {
@@ -50,9 +51,14 @@ impl Chunk {
     /// `ptr` must be a pointer to memory laid out as specified in `Archetype::chunk_layout()`.
     ///
     /// Generally `Archetype::new_chunk` should be called instead.
-    pub unsafe fn from_raw(archetype: Arc<Archetype>, ptr: NonNull<u8>, len: usize) -> Chunk {
+    pub unsafe fn from_raw(
+        archetype: Arc<Archetype>,
+        generation: GenerationID,
+        ptr: NonNull<u8>, len: usize,
+    ) -> Chunk {
         Chunk {
             archetype,
+            generation,
             ptr,
             len,
         }
@@ -61,6 +67,26 @@ impl Chunk {
     /// Return the `Archetype` this chunk belongs to.
     pub fn archetype(&self) -> &Arc<Archetype> {
         &self.archetype
+    }
+
+    /// Return the last generation this chunk was modified in.
+    pub fn generation(&self) -> GenerationID {
+        self.generation
+    }
+
+    /// Update the last generation this chunk was modified in.
+    ///
+    /// Changing the version can cause systems to miss or re-process changes to
+    /// the world, so whilst memory safe, it should be used with care.
+    pub fn set_generation(&mut self, generation: GenerationID) {
+        self.generation = generation;
+    }
+
+    /// Allocate a new generation and assign mark this chunk as modified in that
+    /// generation.
+    pub fn update_generation(&mut self) {
+        let universe = self.archetype.universe().upgrade().unwrap();
+        self.generation = universe.allocate_generation();
     }
 
     /// Get the total number of entities currently stored in this chunk.
@@ -95,6 +121,7 @@ impl Chunk {
 
     /// Get a mutable list of components from this chunk.
     pub fn components_mut<T: Component>(&mut self) -> Option<&mut [T]> {
+        self.update_generation();
         self.archetype.component_offset(T::type_id()).map(|offset| {
             unsafe {
                 let ptr = self.ptr.as_ptr().add(offset) as *mut T;
@@ -106,6 +133,7 @@ impl Chunk {
     /// Create a new `ChunkSplitter` for accessing multiple component lists at the
     /// same time.
     pub fn split_by_component_mut(&mut self) -> ChunkSplitter {
+        self.update_generation();
         ChunkSplitter::new(self)
     }
 
@@ -122,6 +150,8 @@ impl Chunk {
     /// Apply component data to an entity, optionally clearing it.
     fn apply_at<'a>(&mut self, index: usize, component_data: &impl ComponentData<'a>, clear: bool) {
         assert!(self.len > index, "Items can only be replaced at positions up to len()");
+
+        self.update_generation();
         let components = self.archetype.component_types().as_slice().iter()
             .zip(self.archetype.component_offsets().iter());
         let mut component_data = component_data.iter().peekable();
@@ -170,6 +200,8 @@ impl Chunk {
     pub fn insert<'a>(&mut self, index: usize, component_data: &impl ComponentData<'a>) {
         assert!(self.len >= index, "Items can only be inserted at positions up to len()");
 
+        self.update_generation();
+
         let num_to_move = self.len - index;
         self.len += 1;
         let components = self.archetype.component_types().as_slice().iter()
@@ -217,6 +249,9 @@ impl Chunk {
     /// Insert a number of entities from another chunk at the given index.
     pub fn copy_from(&mut self, insert_at: usize, other: &Chunk, range: impl RangeBounds<usize>) {
         assert!(std::ptr::eq(&*self.archetype, &*other.archetype), "chunks can only share elements in the same archetype");
+
+        self.update_generation();
+
         let src_start = match range.start_bound() {
             Bound::Unbounded => 0,
             Bound::Included(x) => *x,
@@ -266,6 +301,8 @@ impl Chunk {
 
     /// Remove an entity from this chunk by its index into the chunk.
     pub fn remove(&mut self, range: impl RangeBounds<usize>) {
+        self.update_generation();
+
         let start = match range.start_bound() {
             Bound::Unbounded => 0,
             Bound::Included(x) => *x,
@@ -344,6 +381,8 @@ impl Chunk {
     pub(crate) fn modify<'a, I>(&mut self, edits: I, component_data: &[ComponentValueRef<'_>])
         where I: Iterator<Item=&'a ChunkEdit> + Clone
     {
+        self.update_generation();
+
         let mut read_idx = self.len();
         let mut write_idx = edits.clone().fold(self.len(), |acc, x| {
             let ChunkEdit(_, action) = x;
@@ -393,6 +432,7 @@ impl Chunk {
 impl Clone for Chunk {
     fn clone(&self) -> Self {
         let archetype = self.archetype.clone();
+        let generation = self.generation;
         let ptr = self.archetype.allocate_page();
         let layout = self.layout();
 
@@ -402,6 +442,7 @@ impl Clone for Chunk {
 
         Chunk {
             archetype,
+            generation,
             ptr,
             len: self.len,
         }

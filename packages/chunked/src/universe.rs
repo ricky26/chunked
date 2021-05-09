@@ -3,10 +3,13 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::{Arc, atomic, RwLock};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU64;
 
 use crate::{Archetype, EntityID};
 use crate::archetype::{ComponentSet, ComponentSetExt, ComponentSliceSet};
+
+/// A convenience type alias for generation IDs.
+pub type GenerationID = u64;
 
 #[derive(Clone)]
 enum ArchetypeSetEntry<'a> {
@@ -64,7 +67,8 @@ struct UniverseSync {
 pub struct Universe {
     chunk_size: usize,
 
-    next_entity_id: AtomicUsize,
+    next_entity_id: AtomicU64,
+    next_generation_id: AtomicU64,
 
     sync: RwLock<UniverseSync>,
 }
@@ -84,7 +88,8 @@ impl Universe {
 
         Arc::new(Universe {
             chunk_size,
-            next_entity_id: AtomicUsize::new(1),
+            next_entity_id: AtomicU64::new(1),
+            next_generation_id: AtomicU64::new(1),
             sync,
         })
     }
@@ -140,6 +145,14 @@ impl Universe {
     /// Generate a new entity ID which is unique for this world.
     pub fn allocate_entity(&self) -> EntityID {
         EntityID::new(self.next_entity_id.fetch_add(1, atomic::Ordering::Relaxed))
+    }
+
+    /// Allocate a new generation ID.
+    ///
+    /// Generation IDs in a universe are increasing numbers used to identify when
+    /// changes happen.
+    pub fn allocate_generation(&self) -> GenerationID {
+        self.next_generation_id.fetch_add(1, atomic::Ordering::Relaxed)
     }
 
     /// Flush all cached memory.
