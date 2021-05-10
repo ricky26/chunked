@@ -133,7 +133,6 @@ impl Chunk {
     /// Create a new `ChunkSplitter` for accessing multiple component lists at the
     /// same time.
     pub fn split_by_component_mut(&mut self) -> ChunkSplitter {
-        self.update_generation();
         ChunkSplitter::new(self)
     }
 
@@ -376,7 +375,7 @@ impl Chunk {
     ///
     /// # Panics
     /// If `edits` is not in reverse order.
-    pub(crate) fn modify<'a, I>(&mut self, edits: I, component_data: &[ComponentValueRef<'_>])
+    pub(crate) fn modify<I>(&mut self, edits: I, component_data: &[ComponentValueRef<'_>])
         where I: Iterator<Item=ChunkEdit> + DoubleEndedIterator + Clone
     {
         let mut num_to_insert = 0;
@@ -506,6 +505,7 @@ impl Drop for Chunk {
 pub struct ChunkSplitter<'a> {
     chunk: &'a mut Chunk,
     locked: BitVec,
+    has_written: bool,
 }
 
 impl<'a> ChunkSplitter<'a> {
@@ -516,6 +516,7 @@ impl<'a> ChunkSplitter<'a> {
         ChunkSplitter {
             chunk,
             locked: BitVec::from_elem(num_components << 1, false),
+            has_written: false,
         }
     }
 
@@ -558,6 +559,11 @@ impl<'a> ChunkSplitter<'a> {
 
     /// Get the mutable slice of all components of the given type in the chunk.
     pub fn components_mut<T: Component>(&mut self) -> Option<&'a mut [T]> {
+        if !self.has_written {
+            self.has_written = true;
+            self.chunk.update_generation();
+        }
+
         if self.mark_type(&T::type_id(), true) {
             let types = unsafe { std::mem::transmute(self.chunk.components_mut::<T>().unwrap()) };
             Some(types)
