@@ -8,7 +8,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use crate::{Archetype, Chunk, EntityID};
 use crate::chunk::{ChunkAction, ChunkEdit, ChunkEntityData};
 use crate::component_data::{ComponentDataSlice, ComponentValueRef};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
 fn chunk_min(c: &Chunk) -> EntityID {
     *c.components::<EntityID>().unwrap().first().unwrap()
@@ -55,6 +55,11 @@ impl ChunkSet {
     /// Get the list of chunks which are members of this `ChunkSet`.
     pub fn chunks(&self) -> &[Arc<Chunk>] {
         &self.storage
+    }
+
+    /// Get a mutable slice to the chunks which are members of this `ChunkSet`.
+    pub fn chunks_mut(&mut self) -> &mut [Arc<Chunk>] {
+        &mut self.storage
     }
 
     /// Lookup the index of the chunk which may contain the given entity.
@@ -333,5 +338,11 @@ impl Deref for ChunkSet {
 
     fn deref(&self) -> &Self::Target {
         &self.storage
+    }
+}
+
+impl DerefMut for ChunkSet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.storage
     }
 }

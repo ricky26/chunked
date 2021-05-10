@@ -12,7 +12,7 @@ use crate::world::transaction::Transaction;
 pub struct ChunkSetGuard<'a> {
     transaction: &'a Transaction,
     archetype: Arc<Archetype>,
-    chunk_set: &'a ChunkSet,
+    chunk_set: &'a mut ChunkSet,
 }
 
 impl<'a> ChunkSetGuard<'a> {
@@ -20,7 +20,7 @@ impl<'a> ChunkSetGuard<'a> {
     pub(crate) fn new(
         transaction: &'a Transaction,
         archetype: Arc<Archetype>,
-        chunk_set: &'a ChunkSet,
+        chunk_set: &'a mut ChunkSet,
     ) -> ChunkSetGuard<'a> {
         ChunkSetGuard {
             transaction,
@@ -47,32 +47,37 @@ impl<'a> ChunkSetGuard<'a> {
 
     /// Fetch a single `Chunk` from this guard.
     pub fn chunk_mut(&mut self, idx: usize) -> Option<ChunkGuard<'_>> {
-        self.chunk_set.get(idx).map(|chunk| {
-            ChunkGuard::new(self.transaction, chunk)
-        })
+        if let Some(chunk) = self.chunk_set.get_mut(idx) {
+            Some(ChunkGuard::new(self.transaction, chunk))
+        } else {
+            None
+        }
     }
 
     /// Iterate over all `Chunk`s in this guard.
-    pub fn iter_chunks_mut(&mut self) -> ChunkIter<'a> {
-        ChunkIter::new(self.transaction, self.chunk_set.chunks())
+    pub fn iter_chunks_mut(self) -> ChunkIter<'a> {
+        ChunkIter::new(self.transaction, self.chunk_set.chunks_mut())
     }
 
     /// Iterate over all `Chunk`s in this guard, in parallel.
-    pub fn par_iter_chunks_mut(&mut self) -> ChunkParIter<'a> {
-        ChunkParIter::new(self.transaction, self.chunk_set.chunks())
+    pub fn par_iter_chunks_mut(self) -> ChunkParIter<'a> {
+        ChunkParIter::new(self.transaction, self.chunk_set.chunks_mut())
     }
 }
 
 /// An iterator over all of the chunks in a `ChunkSetGuard`.
 pub struct ChunkIter<'a> {
     transaction: &'a Transaction,
-    slice: &'a [Arc<Chunk>],
+    slice: &'a mut [Arc<Chunk>],
     offset: usize,
 }
 
 impl<'a> ChunkIter<'a> {
     // Create a new `ChunkIter`.
-    pub(crate) fn new(transaction: &'a Transaction, slice: &'a [Arc<Chunk>]) -> ChunkIter<'a> {
+    pub(crate) fn new(
+        transaction: &'a Transaction,
+        slice: &'a mut [Arc<Chunk>],
+    ) -> ChunkIter<'a> {
         ChunkIter {
             transaction,
             slice,
@@ -85,10 +90,12 @@ impl<'a> Iterator for ChunkIter<'a> {
     type Item = ChunkGuard<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.slice.get(self.offset).map(|chunk| {
+        if let Some(chunk) = self.slice.get_mut(self.offset) {
             self.offset += 1;
-            ChunkGuard::new(self.transaction, chunk)
-        })
+            Some(ChunkGuard::new(self.transaction, chunk))
+        } else {
+            None
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -104,9 +111,11 @@ impl<'a> DoubleEndedIterator for ChunkIter<'a> {
         }
 
         self.offset -= 1;
-        self.slice.get(self.offset).map(|chunk| {
-            ChunkGuard::new(self.transaction, chunk)
-        })
+        if let Some(chunk) = self.slice.get_mut(self.offset) {
+            Some(ChunkGuard::new(self.transaction, chunk))
+        } else {
+            None
+        }
     }
 }
 
@@ -116,11 +125,14 @@ impl<'a> ExactSizeIterator for ChunkIter<'a> {}
 /// A parallel iterator over all chunks in a `ChunkSetGuard`.
 pub struct ChunkParIter<'a> {
     transaction: &'a Transaction,
-    slice: &'a [Arc<Chunk>],
+    slice: &'a mut [Arc<Chunk>],
 }
 
 impl<'a> ChunkParIter<'a> {
-    pub(crate) fn new(transaction: &'a Transaction, slice: &'a [Arc<Chunk>]) -> ChunkParIter<'a> {
+    pub(crate) fn new(
+        transaction: &'a Transaction,
+        slice: &'a mut [Arc<Chunk>],
+    ) -> ChunkParIter<'a> {
         ChunkParIter {
             transaction,
             slice,
@@ -154,12 +166,12 @@ impl<'a> IndexedParallelIterator for ChunkParIter<'a> {
 /// A producer for iterating over chunks in a set in parallel.
 pub(crate) struct ChunkProducer<'a> {
     transaction: &'a Transaction,
-    slice: &'a [Arc<Chunk>],
+    slice: &'a mut [Arc<Chunk>],
 }
 
 impl<'a> ChunkProducer<'a> {
     /// Create a new `ChunkProducer`.
-    pub fn new(transaction: &'a Transaction, slice: &'a [Arc<Chunk>]) -> ChunkProducer<'a> {
+    pub fn new(transaction: &'a Transaction, slice: &'a mut [Arc<Chunk>]) -> ChunkProducer<'a> {
         ChunkProducer {
             transaction,
             slice,
@@ -176,7 +188,7 @@ impl<'a> Producer for ChunkProducer<'a> {
     }
 
     fn split_at(self, index: usize) -> (Self, Self) {
-        let (left, right) = self.slice.split_at(index);
+        let (left, right) = self.slice.split_at_mut(index);
         let left = ChunkProducer::new(self.transaction, left);
         let right = ChunkProducer::new(self.transaction, right);
         (left, right)

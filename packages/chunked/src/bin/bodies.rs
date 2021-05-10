@@ -35,7 +35,7 @@ impl System for ApplyAcceleration {
                 Lock::Read(Position::type_id()),
                 Lock::Write(Velocity::type_id()),
                 Lock::Write(Mass::type_id()),
-            ], move |mut tx| {
+            ], move |tx| {
                 tx.par_iter_chunks_mut().for_each(|chunk_a| {
                     let ids_a = chunk_a.components::<EntityID>().unwrap();
                     let positions_a = chunk_a.components::<Position>().unwrap();
@@ -108,7 +108,7 @@ impl System for ApplyVelocity {
         self.0.transaction([
                                Lock::Read(Velocity::type_id()),
                                Lock::Write(Position::type_id()),
-                           ], |mut tx| {
+                           ], |tx| {
             tx.par_iter_chunks_mut().for_each(|chunk| {
                 let velocities = chunk.components::<Velocity>().unwrap();
                 let positions = chunk.components_mut::<Position>().unwrap();

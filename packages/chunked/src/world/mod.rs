@@ -2,11 +2,13 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::mem::transmute;
 use std::sync::Arc;
 
 use futures::channel::{mpsc, oneshot};
-use futures::lock::{Mutex, MutexGuard};
 use futures::future;
+use futures::future::Either;
+use futures::lock::{Mutex, MutexGuard};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 
@@ -19,7 +21,6 @@ use crate::component::ComponentTypeID;
 use crate::snapshot::Snapshot;
 use crate::universe::Universe;
 use crate::world::transaction::locks_include_archetype;
-use futures::future::Either;
 
 mod chunk;
 mod chunk_set;
@@ -179,8 +180,11 @@ struct WorldTransactions {
     lock: Option<MutexGuard<'static, Arc<Snapshot>>>,
     snapshot: Arc<Mutex<Arc<Snapshot>>>,
 
-    active_transactions: Vec<Arc<Transaction>>,
+    #[allow(clippy::vec_box)]
+    active_transactions: Vec<Box<Transaction>>,
     pending_transactions: VecDeque<TransactionCommand>,
+
+    next_transaction: u32,
 }
 
 impl WorldTransactions {
@@ -192,35 +196,45 @@ impl WorldTransactions {
 
             active_transactions: Vec::new(),
             pending_transactions: VecDeque::new(),
+
+            next_transaction: 0,
         }
     }
 
     /// Add the transaction to the transaction list and return the future to execute it.
-    fn start_transaction(&mut self, cmd: TransactionCommand) -> impl Future<Output=Arc<Transaction>> {
+    fn start_transaction(&mut self, cmd: TransactionCommand) -> impl Future<Output=u32> {
         let (locks, f, tx) = cmd;
-        let snapshot = self.lock.as_mut().unwrap();
+
+        let id = self.next_transaction;
+        self.next_transaction += 1;
+
+        // We can transmute this to a &'static mut because:
+        // - We are going to protect the lifetime (we release the transaction when it's done)
+        // - Only chunk edits are done and we manually make sure they don't alias
+        let mut_snap = Arc::make_mut(self.lock.as_mut().unwrap());
+        let snapshot: &'static mut Snapshot = unsafe { transmute(mut_snap) };
+
         let archetypes = (0..snapshot.chunk_sets().len())
             .map(|idx| snapshot.universe().archetype_by_id(idx).unwrap())
             .filter(|a| transaction::locks_include_archetype(a, &locks))
             .collect();
-        let transaction = Arc::new(
-            Transaction::new(snapshot.clone(), archetypes, locks));
-
-        self.active_transactions.push(transaction.clone());
-
+        let transaction = Box::new(
+            Transaction::new(id, archetypes, locks));
+        let transaction_ref: &Transaction = unsafe { transmute(&*transaction as &Transaction) };
+        self.active_transactions.push(transaction);
         let (done_tx, done_rx) = oneshot::channel::<()>();
 
-        let transaction_clone = transaction.clone();
+        let guard = TransactionGuard::new(transaction_ref, snapshot);
+
         rayon::spawn(move || {
             let _ = done_tx;
             let _ = tx;
-            let guard = TransactionGuard::new(&transaction_clone);
             (f)(guard);
         });
 
         async move {
             done_rx.await.ok();
-            transaction
+            id
         }
     }
 
@@ -315,7 +329,7 @@ impl WorldTransactions {
                     }
                 }
                 Either::Right(Some(done)) => {
-                    self.active_transactions.retain(|t| !Arc::ptr_eq(t, &done));
+                    self.active_transactions.retain(|t| t.id() != done);
 
                     // Start any pending transactions which are now possible.
                     let mut i = 0;

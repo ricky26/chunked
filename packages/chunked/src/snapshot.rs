@@ -85,6 +85,11 @@ impl Snapshot {
         self.chunk_sets.get(a.id())
     }
 
+    /// Get a mutable reference to a `ChunkSet` for a particular archetype.
+    pub fn chunk_set_mut(&mut self, a: &Arc<Archetype>) -> Option<&mut ChunkSet> {
+        self.chunk_sets.get_mut(a.id())
+    }
+
     /// Get an `EntityEntry` for the entity with the given ID.
     ///
     /// Returns None if the entity doesn't exist in this snapshot.
