@@ -6,7 +6,7 @@ use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::ops::{Bound, RangeBounds};
 use std::ptr::{self, NonNull};
-use std::sync::Arc;
+use std::sync::{Arc, atomic};
 
 use bit_vec::BitVec;
 
@@ -17,6 +17,7 @@ use crate::component::{
     ComponentTypeID,
 };
 use crate::component_data::{ComponentData, ComponentDataSlice, ComponentValueRef};
+use std::sync::atomic::AtomicU64;
 
 /// A single action on an entity in a `Chunk`.
 #[derive(Clone)]
@@ -35,7 +36,7 @@ pub(crate) struct ChunkEdit(pub EntityID, pub ChunkAction);
 /// memory.
 pub struct Chunk {
     archetype: Arc<Archetype>,
-    generation: GenerationID,
+    generation: AtomicU64,
     ptr: NonNull<u8>,
     len: usize,
 }
@@ -58,7 +59,7 @@ impl Chunk {
     ) -> Chunk {
         Chunk {
             archetype,
-            generation,
+            generation: AtomicU64::new(generation),
             ptr,
             len,
         }
@@ -71,22 +72,22 @@ impl Chunk {
 
     /// Return the last generation this chunk was modified in.
     pub fn generation(&self) -> GenerationID {
-        self.generation
+        self.generation.load(atomic::Ordering::Relaxed)
     }
 
     /// Update the last generation this chunk was modified in.
     ///
     /// Changing the version can cause systems to miss or re-process changes to
     /// the world, so whilst memory safe, it should be used with care.
-    pub fn set_generation(&mut self, generation: GenerationID) {
-        self.generation = generation;
+    pub fn set_generation(&self, generation: GenerationID) {
+        self.generation.store(generation, atomic::Ordering::Relaxed)
     }
 
     /// Allocate a new generation and assign mark this chunk as modified in that
     /// generation.
-    pub fn update_generation(&mut self) {
+    pub fn update_generation(&self) {
         let universe = self.archetype.universe().upgrade().unwrap();
-        self.generation = universe.allocate_generation();
+        self.generation.store(universe.generation(), atomic::Ordering::Relaxed);
     }
 
     /// Get the total number of entities currently stored in this chunk.
@@ -249,7 +250,6 @@ impl Chunk {
     pub fn copy_from(&mut self, insert_at: usize, other: &Chunk, range: impl RangeBounds<usize>) {
         assert!(std::ptr::eq(&*self.archetype, &*other.archetype), "chunks can only share elements in the same archetype");
 
-        self.update_generation();
 
         let src_start = match range.start_bound() {
             Bound::Unbounded => 0,
@@ -270,6 +270,12 @@ impl Chunk {
         let dest_end = insert_at + n;
         assert!(dest_start <= dest_end);
         assert!(dest_start <= self.len);
+
+        if n == 0 {
+            return;
+        }
+
+        self.update_generation();
 
         let num_to_move = self.len - dest_start;
         self.len += n;
@@ -298,7 +304,6 @@ impl Chunk {
 
     /// Remove an entity from this chunk by its index into the chunk.
     pub fn remove(&mut self, range: impl RangeBounds<usize>) {
-        self.update_generation();
 
         let start = match range.start_bound() {
             Bound::Unbounded => 0,
@@ -313,6 +318,12 @@ impl Chunk {
         assert!(start <= end);
         assert!(start <= self.len);
         assert!(end <= self.len);
+
+        if start == end {
+            return;
+        }
+
+        self.update_generation();
 
         let num_to_move = self.len - end;
         self.len -= end - start;
@@ -461,7 +472,7 @@ impl Chunk {
 impl Clone for Chunk {
     fn clone(&self) -> Self {
         let archetype = self.archetype.clone();
-        let generation = self.generation;
+        let generation = AtomicU64::new(self.generation.load(atomic::Ordering::Relaxed));
         let ptr = self.archetype.allocate_page();
         let layout = self.layout();
 
@@ -483,7 +494,7 @@ impl Debug for Chunk {
         write!(f,
                "Chunk {{ archetype: {:?}, generation: {},  len: {} }}",
                self.archetype.as_ref() as *const _,
-               self.generation,
+               self.generation.load(atomic::Ordering::Relaxed),
                self.len)
     }
 }

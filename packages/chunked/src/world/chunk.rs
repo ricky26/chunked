@@ -74,6 +74,7 @@ impl<'a> ChunkGuard<'a> {
         position.and_then(move |idx| {
             let taken = self.taken.fetch_or(1 << idx, atomic::Ordering::Relaxed);
             if (taken & (1 << idx)) == 0 {
+                chunk.update_generation();
                 chunk.components_mut::<T>()
             } else {
                 None

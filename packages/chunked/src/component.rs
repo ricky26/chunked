@@ -248,12 +248,10 @@ mod test {
             }
         }
 
-        let component_type = ComponentRegistration::new::<A>(ComponentTypeID(12));
-        assert_eq!(component_type.type_id(), A::type_id());
-        assert_eq!(component_type.layout(), Layout::new::<A>());
+        assert_eq!(A::type_id().layout(), Layout::new::<A>());
 
         let raw = &mut [0];
-        component_type.set_default(raw);
+        A::type_id().registration().set_default(raw);
         assert_eq!(raw[0], 42);
     }
 }

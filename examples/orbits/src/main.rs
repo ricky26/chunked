@@ -177,7 +177,7 @@ fn render_thread(world: Arc<World>) {
 #[tokio::main]
 async fn main() {
     let universe = Universe::new();
-    let world = Arc::new(World::new(universe));
+    let world = Arc::new(World::new(universe.clone()));
 
     // Populate universe!
     {
@@ -215,6 +215,8 @@ async fn main() {
             .after(accel_sys));
 
         loop {
+            universe.start_generation();
+
             let deadline = Instant::now() + Duration::from_millis(16);
             system_set.update().await;
             sleep_until(deadline).await;

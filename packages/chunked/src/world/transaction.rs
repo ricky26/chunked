@@ -78,8 +78,6 @@ impl Transaction {
     pub fn chunk_mut<'a>(&self, chunk: &'a mut Arc<Chunk>) -> &'static mut Chunk {
         let _lock = self.chunk_lock.lock().unwrap();
         let chunk: &mut Chunk = unsafe { std::mem::transmute(Arc::make_mut(chunk)) };
-        // NOTE: this will cause some pretty pessimistic generation increases
-        chunk.update_generation();
         chunk
     }
 }

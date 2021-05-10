@@ -294,7 +294,7 @@ impl Archetype {
         // Universe should contain a reference to us, so this should always be possible.
         let universe = self.universe.upgrade().unwrap();
         let archetype = self.clone();
-        let generation = universe.allocate_generation();
+        let generation = universe.generation();
         let ptr = self.allocate_page();
         unsafe { Chunk::from_raw(archetype, generation, ptr, 0) }
     }

@@ -147,12 +147,17 @@ impl Universe {
         EntityID::new(self.next_entity_id.fetch_add(1, atomic::Ordering::Relaxed))
     }
 
-    /// Allocate a new generation ID.
+    /// Start a new generation.
     ///
     /// Generation IDs in a universe are increasing numbers used to identify when
     /// changes happen.
-    pub fn allocate_generation(&self) -> GenerationID {
-        self.next_generation_id.fetch_add(1, atomic::Ordering::Relaxed)
+    pub fn start_generation(&self) -> GenerationID {
+        self.next_generation_id.fetch_add(1, atomic::Ordering::Relaxed) + 1
+    }
+
+    /// Get the current generation ID.
+    pub fn generation(&self) -> GenerationID {
+        self.next_generation_id.load(atomic::Ordering::Relaxed)
     }
 
     /// Flush all cached memory.
