@@ -214,9 +214,10 @@ impl WorldTransactions {
         let mut_snap = Arc::make_mut(self.lock.as_mut().unwrap());
         let snapshot: &'static mut Snapshot = unsafe { transmute(mut_snap) };
 
-        let archetypes = (0..snapshot.chunk_sets().len())
-            .map(|idx| snapshot.universe().archetype_by_id(idx).unwrap())
+        let archetypes = snapshot.chunk_sets().iter()
+            .map(|chunk_set| chunk_set.archetype())
             .filter(|a| transaction::locks_include_archetype(a, &locks))
+            .cloned()
             .collect();
         let transaction = Box::new(
             Transaction::new(id, archetypes, locks));
@@ -271,11 +272,9 @@ impl WorldTransactions {
         }
 
         // If they do collide, check whether they are distinct chunk sets.
-        for (idx, _) in snap.chunk_sets().iter().enumerate() {
-            let archetype = snap.universe().archetype_by_id(idx).unwrap();
-
-            if locks_include_archetype(&archetype, existing)
-                && locks_include_archetype(&archetype, new) {
+        for chunk_set in snap.chunk_sets().iter() {
+            if locks_include_archetype(chunk_set.archetype(), existing)
+                && locks_include_archetype(chunk_set.archetype(), new) {
                 return false;
             }
         }

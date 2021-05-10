@@ -24,22 +24,30 @@ fn chunk_max(c: &Chunk) -> EntityID {
 /// chunks.
 #[derive(Debug, Clone)]
 pub struct ChunkSet {
+    archetype: Arc<Archetype>,
     storage: Vec<Arc<Chunk>>,
 }
 
 impl ChunkSet {
     /// Create a new empty chunk set.
-    pub fn new() -> ChunkSet {
+    pub fn new(archetype: Arc<Archetype>) -> ChunkSet {
         ChunkSet {
+            archetype,
             storage: Vec::new(),
         }
     }
 
     /// Create a new chunk set with a given capacity.
-    pub fn with_capacity(capacity: usize) -> ChunkSet {
+    pub fn with_capacity(archetype: Arc<Archetype>, capacity: usize) -> ChunkSet {
         ChunkSet {
+            archetype,
             storage: Vec::with_capacity(capacity),
         }
+    }
+
+    /// Get the archetype this `ChunkSet` manages chunks for.
+    pub fn archetype(&self) -> &Arc<Archetype> {
+        &self.archetype
     }
 
     /// Get the number of chunks in this set.
@@ -177,7 +185,6 @@ impl ChunkSet {
 
     /// Apply an edit list to this chunk.
     pub(crate) fn modify<'a>(&mut self,
-                             archetype: Arc<Archetype>,
                              mut edits: Vec<ChunkEdit>,
                              component_data: &[ComponentValueRef<'a>]) {
         // This is needed so we can optimally resize single chunks later on.
@@ -193,7 +200,7 @@ impl ChunkSet {
             let mut chunk_idx = if let Some(chunk_idx) = chunk_idx {
                 chunk_idx
             } else {
-                self.storage.push(Arc::new(archetype.clone().new_chunk()));
+                self.storage.push(Arc::new(self.archetype.clone().new_chunk()));
                 0
             };
             last_chunk_index = chunk_idx;
@@ -247,7 +254,7 @@ impl ChunkSet {
                 let mut read_idx = 0;
                 let mut edit_idx = 0;
 
-                let mut new_chunk = archetype.clone().new_chunk();
+                let mut new_chunk = self.archetype.clone().new_chunk();
 
                 fn alloc_new_chunk(storage: &mut Vec<Arc<Chunk>>, archetype: &Arc<Archetype>, new_chunk: &mut Chunk, chunk_idx: &mut usize) {
                     if new_chunk.len() == new_chunk.capacity() {
@@ -268,7 +275,7 @@ impl ChunkSet {
                         Some(ChunkEdit(id, action)) => {
                             if old_id.map_or(false, |oid| oid < id) {
                                 // The entry in `old_chunk` is before the next edit, just copy it.
-                                alloc_new_chunk(&mut self.storage, &archetype, &mut new_chunk, &mut chunk_idx);
+                                alloc_new_chunk(&mut self.storage, &self.archetype, &mut new_chunk, &mut chunk_idx);
 
                                 let write_idx = new_chunk.len();
                                 new_chunk.insert(
@@ -280,7 +287,7 @@ impl ChunkSet {
 
                             match action {
                                 ChunkAction::Upsert(data_start, data_end) => {
-                                    alloc_new_chunk(&mut self.storage, &archetype, &mut new_chunk, &mut chunk_idx);
+                                    alloc_new_chunk(&mut self.storage, &self.archetype, &mut new_chunk, &mut chunk_idx);
 
                                     let data_slice = &component_data[data_start..data_end];
                                     let data = ComponentDataSlice::try_from(data_slice).unwrap();
@@ -312,7 +319,7 @@ impl ChunkSet {
                         }
                         None => {
                             while read_idx < entity_ids.len() {
-                                alloc_new_chunk(&mut self.storage, &archetype, &mut new_chunk, &mut chunk_idx);
+                                alloc_new_chunk(&mut self.storage, &self.archetype, &mut new_chunk, &mut chunk_idx);
 
                                 let to_copy = (entity_ids.len() - read_idx)
                                     .min(new_chunk.capacity() - new_chunk.len());
@@ -333,12 +340,6 @@ impl ChunkSet {
         }
 
         self.rebalance();
-    }
-}
-
-impl Default for ChunkSet {
-    fn default() -> Self {
-        ChunkSet::new()
     }
 }
 

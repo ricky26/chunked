@@ -118,22 +118,21 @@ impl Snapshot {
         if !edit_list.is_empty() {
             let archetype_edits = edit_list.chunk_set_edits;
 
-            let universe = this.universe.clone();
             let edit_snap = this.make_mut();
-            if edit_snap.chunk_sets.len() < archetype_edits.len() {
-                edit_snap.chunk_sets.resize(archetype_edits.len(), ChunkSet::new());
+            while edit_snap.chunk_sets.len() < archetype_edits.len() {
+                let archetype = edit_snap.universe
+                    .archetype_by_id(edit_snap.chunk_sets.len())
+                    .unwrap();
+                edit_snap.chunk_sets.push(ChunkSet::new(archetype));
             }
 
             let chunk_sets = edit_snap.chunk_sets.iter_mut();
             let arch_edits = archetype_edits.into_iter();
-            let arch_edit_sets = arch_edits.zip(chunk_sets)
-                .enumerate()
-                .map(|(id, (edits, chunk_set))|
-                    (universe.archetype_by_id(id).unwrap(), edits, chunk_set));
+            let arch_edit_sets = arch_edits.zip(chunk_sets);
 
             // TODO: make this parallel.
-            for (arch, edits, chunk_set) in arch_edit_sets {
-                chunk_set.modify(arch, edits, &edit_list.component_data);
+            for (edits, chunk_set) in arch_edit_sets {
+                chunk_set.modify(edits, &edit_list.component_data);
             }
         }
     }
