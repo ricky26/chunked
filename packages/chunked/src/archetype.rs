@@ -1,9 +1,10 @@
 //! Archetypes are the 'layout' of entities, containing a list of the attached components.
 
-use std::alloc;
+use std::{alloc, fmt};
 use std::alloc::Layout;
 use std::cmp::Ordering;
 use std::convert::TryFrom;
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::{Arc, Weak};
@@ -368,6 +369,18 @@ impl Archetype {
 impl Drop for Archetype {
     fn drop(&mut self) {
         self.flush()
+    }
+}
+
+impl Debug for Archetype {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Archetype({}:", self.id)?;
+
+        for type_id in self.component_types.as_slice() {
+            write!(f, " {:?}", type_id)?;
+        }
+
+        write!(f, ")")
     }
 }
 
