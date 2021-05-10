@@ -159,12 +159,15 @@ impl Debug for Snapshot {
 
             writeln!(f, "      Chunks:")?;
             for chunk in chunk_set.iter() {
-                writeln!(f, "        {:?} - {} entities", chunk.deref() as *const _, chunk.len())?;
+                writeln!(f, "        {:?} - generation {} - {} entities",
+                         chunk.deref() as *const _,
+                         chunk.generation(),
+                         chunk.len())?;
 
                 let ids = chunk.components::<EntityID>().unwrap();
 
                 for entity_id in ids {
-                    writeln!(f, "          Entity {:?} - Chunk {:?}", entity_id, chunk.deref() as *const _)?;
+                    writeln!(f, "          Entity {:?}", entity_id)?;
                 }
             }
         }
@@ -223,7 +226,7 @@ impl<'a, T: Clone> From<&'a mut T> for Modifiable<'a, T> {
     }
 }
 
-impl <'a, T: Clone> From<&'a mut Arc<T>> for Modifiable<'a, T> {
+impl<'a, T: Clone> From<&'a mut Arc<T>> for Modifiable<'a, T> {
     fn from(x: &'a mut Arc<T>) -> Self {
         Modifiable::Arc(x)
     }

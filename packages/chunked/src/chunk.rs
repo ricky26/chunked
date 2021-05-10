@@ -258,7 +258,7 @@ impl Chunk {
             Bound::Excluded(x) => 1 + *x,
         };
         let src_end = match range.end_bound() {
-            Bound::Unbounded => self.len,
+            Bound::Unbounded => other.len,
             Bound::Included(x) => 1 + *x,
             Bound::Excluded(x) => *x,
         };
@@ -271,7 +271,6 @@ impl Chunk {
         let dest_end = insert_at + n;
         assert!(dest_start <= dest_end);
         assert!(dest_start <= self.len);
-        assert!(dest_end <= self.len);
 
         let num_to_move = self.len - dest_start;
         self.len += n;
@@ -286,15 +285,14 @@ impl Chunk {
 
             unsafe {
                 if num_to_move > 0 {
-                    let count = size * num_to_move;
                     let from = self.ptr.as_ptr().add(insert_offset);
                     let to = from.add(n * size);
-                    ptr::copy(from, to, count);
+                    ptr::copy(from, to, num_to_move * size);
                 }
 
                 let write_ptr = self.ptr.as_ptr().add(insert_offset);
                 let read_ptr = other.ptr.as_ptr().add(source_offset);
-                std::ptr::copy_nonoverlapping(read_ptr, write_ptr, n);
+                std::ptr::copy_nonoverlapping(read_ptr, write_ptr, n * size);
             }
         }
     }
@@ -318,7 +316,7 @@ impl Chunk {
         assert!(end <= self.len);
 
         let num_to_move = self.len - end;
-        self.len = start + num_to_move;
+        self.len -= end - start;
         let ptr = self.ptr.as_ptr();
         let components = self.archetype.component_types().as_slice().iter()
             .zip(self.archetype.component_offsets().iter());
@@ -379,23 +377,60 @@ impl Chunk {
     /// # Panics
     /// If `edits` is not in reverse order.
     pub(crate) fn modify<'a, I>(&mut self, edits: I, component_data: &[ComponentValueRef<'_>])
-        where I: Iterator<Item=&'a ChunkEdit> + Clone
+        where I: Iterator<Item=ChunkEdit> + DoubleEndedIterator + Clone
     {
-        self.update_generation();
+        let mut num_to_insert = 0;
+        let mut num_to_remove = 0;
 
-        let mut read_idx = self.len();
-        let mut write_idx = edits.clone().fold(self.len(), |acc, x| {
-            let ChunkEdit(_, action) = x;
+        let mut read_idx = 0;
+        let mut last_modify_idx = 0;
+        let mut write_idx = 0;
+
+        let mut num_actions = 0;
+        let mut last_id = None;
+
+        // First pass: calculate target size and process removals
+        for ChunkEdit(id, action) in edits.clone() {
+            assert!(last_id.map_or(true, |i| id > i), "edits must be sorted in ascending ID order");
+            last_id = Some(id);
+
+            let entity_ids = self.components::<EntityID>().unwrap();
 
             match action {
-                ChunkAction::Upsert(_, _) => acc + 1,
-                ChunkAction::Remove => acc - 1,
+                ChunkAction::Upsert(_, _) => {
+                    if let Err(idx) = entity_ids[read_idx..].binary_search(&id) {
+                        num_to_insert += 1;
+                        read_idx += idx;
+                    }
+                }
+                ChunkAction::Remove => {
+                    let idx = read_idx + entity_ids[read_idx..].binary_search(&id).unwrap();
+                    let to_move = idx - last_modify_idx;
+
+                    num_to_remove += 1;
+                    read_idx = idx + 1;
+                    write_idx += to_move;
+                    last_modify_idx = read_idx;
+
+                    self.move_internal(write_idx - to_move, idx - to_move, to_move);
+                }
             }
-        });
+
+            num_actions += 1;
+        }
+
+        if num_actions == 0 {
+            return;
+        }
+
+        let mut read_idx = self.len() - num_to_remove;
+        let mut write_idx = read_idx + num_to_insert;
         assert!(write_idx <= self.capacity());
+
+        self.update_generation();
         self.len = write_idx;
 
-        for ChunkEdit(id, action) in edits.cloned() {
+        for ChunkEdit(id, action) in edits.rev() {
             let entity_ids = self.components::<EntityID>().unwrap();
 
             match action {
@@ -411,19 +446,14 @@ impl Chunk {
                             let to_move = read_idx - idx;
                             read_idx = idx;
                             write_idx -= to_move + 1;
+                            assert!(write_idx + 1 >= read_idx);
                             self.move_internal(write_idx + 1, read_idx, to_move);
                             self.replace_at(write_idx, &data);
                             self.components_mut::<EntityID>().unwrap()[write_idx] = id;
                         }
                     }
                 }
-                ChunkAction::Remove => {
-                    let src_idx = entity_ids[..read_idx].binary_search(&id).unwrap();
-                    let to_move = read_idx - (src_idx + 1);
-                    self.move_internal(write_idx - to_move, read_idx - to_move, to_move);
-                    read_idx = src_idx;
-                    write_idx -= to_move;
-                }
+                ChunkAction::Remove => {}
             }
         }
     }
@@ -452,8 +482,9 @@ impl Clone for Chunk {
 impl Debug for Chunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f,
-               "Chunk {{ archetype: {:?}, len: {} }}",
+               "Chunk {{ archetype: {:?}, generation: {},  len: {} }}",
                self.archetype.as_ref() as *const _,
+               self.generation,
                self.len)
     }
 }

@@ -71,7 +71,7 @@ impl ChunkSet {
                 *c.components::<EntityID>().unwrap().first().unwrap()
             }) {
                 Ok(idx) => idx,
-                Err(idx) => idx.min(1) - 1,
+                Err(idx) => idx.max(1) - 1,
             };
             Some(idx)
         }
@@ -117,11 +117,7 @@ impl ChunkSet {
             }
         }
 
-        if hint == 0 {
-            None
-        } else {
-            self.chunk_index_for_entity(id)
-        }
+        self.chunk_index_for_entity(id)
     }
 
     /// Create a parallel iterator over the chunks in this set.
@@ -212,7 +208,7 @@ impl ChunkSet {
                 let mut end = chunk_edit_start;
                 while end < edits.len() {
                     let id = edits[end].0;
-                    if id >= max_id {
+                    if id > max_id {
                         break;
                     }
                     end += 1;
@@ -240,7 +236,7 @@ impl ChunkSet {
 
                 // Reverse iterate so we can resize optimally.
                 let edit_chunk = Arc::make_mut(edit_chunk);
-                edit_chunk.modify(chunk_edits.iter().rev(), component_data);
+                edit_chunk.modify(chunk_edits.iter().cloned(), component_data);
             } else {
                 // It doesn't fit in one chunk, so just start streaming chunks until we've
                 // applied all edits.
@@ -270,6 +266,18 @@ impl ChunkSet {
 
                     match next_edit {
                         Some(ChunkEdit(id, action)) => {
+                            if old_id.map_or(false, |oid| oid < id) {
+                                // The entry in `old_chunk` is before the next edit, just copy it.
+                                alloc_new_chunk(&mut self.storage, &archetype, &mut new_chunk, &mut chunk_idx);
+
+                                let write_idx = new_chunk.len();
+                                new_chunk.insert(
+                                    write_idx,
+                                    &ChunkEntityData::new(old_chunk.clone(), read_idx));
+                                read_idx += 1;
+                                continue;
+                            }
+
                             match action {
                                 ChunkAction::Upsert(data_start, data_end) => {
                                     alloc_new_chunk(&mut self.storage, &archetype, &mut new_chunk, &mut chunk_idx);
@@ -278,28 +286,29 @@ impl ChunkSet {
                                     let data = ComponentDataSlice::try_from(data_slice).unwrap();
 
                                     if Some(id) == old_id {
-                                        // If this is an update we have to apply the old components
-                                        // first, then copy over the top to make sure we don't
-                                        // lose any values.
+                                        // The entity already existed, copy it then update.
                                         let write_idx = new_chunk.len();
                                         new_chunk.insert(
                                             write_idx,
                                             &ChunkEntityData::new(old_chunk.clone(), read_idx));
                                         new_chunk.update_at(write_idx, &data);
+                                        edit_idx += 1;
                                         read_idx += 1;
                                     } else {
+                                        // New ID comes first, just insert.
                                         let write_idx = new_chunk.len();
                                         new_chunk.insert(write_idx, &data);
                                         new_chunk.components_mut::<EntityID>().unwrap()[write_idx] = id;
+                                        edit_idx += 1;
                                     }
                                 }
                                 ChunkAction::Remove => {
+                                    // We're at the entry we want to delete, skip it.
                                     assert_eq!(id, old_id.unwrap());
                                     read_idx += 1;
+                                    edit_idx += 1;
                                 }
                             }
-
-                            edit_idx += 1;
                         }
                         None => {
                             while read_idx < entity_ids.len() {
@@ -310,7 +319,7 @@ impl ChunkSet {
                                 new_chunk.copy_from(
                                     new_chunk.len(),
                                     &old_chunk,
-                                    read_idx..read_idx+to_copy);
+                                    read_idx..read_idx + to_copy);
                                 read_idx += to_copy;
                             }
                         }
